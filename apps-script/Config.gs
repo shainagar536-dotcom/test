@@ -1,0 +1,96 @@
+/**
+ * Configuration for the lead-status notification automation.
+ *
+ * Secrets are NOT stored here. They live in Script Properties
+ * (Project Settings -> Script Properties) and are read via secret_().
+ * Nothing in this repository should ever contain a client secret.
+ */
+var CONFIG = {
+  // ---------------------------------------------------------------- safety
+  // Stage 1 of the rollout plan: scan and report, send nothing.
+  // Leave this true until a dry run has been reviewed and looks correct.
+  dryRun: true,
+
+  // Flood brake. If a single run finds more than this many leads to notify
+  // about, nothing is sent and the operator gets one alert instead. Guards
+  // against a bulk status edit in the CRM firing hundreds of real emails.
+  maxSendsPerRun: 25,
+
+  // Recipient of flood-brake and failure alerts — the operator, not a source.
+  operatorEmail: '',
+
+  // ------------------------------------------------------------ workbooks
+  // The workbook holding the automation's own tabs (state, log, mapping).
+  workbookId: '1Omrb0-sijrV-81IBUgNj36dGv5gxp44cV8AJrjGZiHc',
+
+  // Source -> contact-details mapping. Kept separate from the leads export so
+  // a re-export from Surense cannot wipe the contact details. Until the
+  // dedicated sheet exists, the mapping tab inside workbookId is used.
+  sourcesWorkbookId: null,   // null = use workbookId
+
+  tabs: {
+    mapping: 'מיפוי',
+    state: 'מצב',
+    log: 'יומן'
+  },
+
+  // Headers expected in the mapping tab.
+  mappingColumns: {
+    source: 'מקור',
+    email: 'מייל',
+    whatsapp: 'וואטספ',
+    active: 'פעיל'
+  },
+
+  // --------------------------------------------------------------- surense
+  surense: {
+    tokenUrl: 'https://api.surense.com/oauth/token',
+    apiBase: 'https://api.surense.com/api/v1',
+    pageSize: 50,          // hard API limit
+    maxPages: 40           // stops a runaway pagination loop
+  },
+
+  /**
+   * Field names as they come back from /leads/search. The exact spelling has
+   * not been verified against a live response yet — a dry run logs the first
+   * raw lead so these can be corrected without touching any logic.
+   */
+  leadFields: {
+    id: 'id',
+    displayId: 'leadNumber',
+    clientName: 'name',
+    statusId: 'statusId',
+    statusName: 'statusName',
+    statusDate: 'statusDate',
+    sourceName: 'sourceName'
+  },
+
+  // -------------------------------------------------------------- schedule
+  timezone: 'Asia/Jerusalem',
+  activeDays: [0, 1, 2, 3, 4, 5],   // 0 = Sunday ... 6 = Saturday
+  activeHours: null,                // null = every hour of an active day
+
+  // How far back the very first run looks, before a watermark exists.
+  firstRunLookbackHours: 1,
+
+  logRetention: 2000
+};
+
+/**
+ * Reads a secret from Script Properties.
+ *
+ * @param {string} name
+ * @param {boolean=} required
+ * @return {string}
+ */
+function secret_(name, required) {
+  var value = PropertiesService.getScriptProperties().getProperty(name);
+
+  if (!value && required !== false) {
+    throw new Error(
+      'Missing script property "' + name + '". Set it under ' +
+      'Project Settings -> Script Properties.');
+  }
+
+  return value || '';
+}
