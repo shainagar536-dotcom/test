@@ -80,8 +80,17 @@ const sandbox = {
   UrlFetchApp: { fetch: (...a) => fetchImpl(...a) }
 };
 vm.createContext(sandbox);
-for (const f of ['Config', 'Statuses', 'Log', 'Sheets', 'Surense', 'Notify', 'Main', 'Triggers']) {
-  vm.runInContext(fs.readFileSync(__dirname + '/../apps-script/' + f + '.gs', 'utf8'), sandbox, { filename: f });
+
+// `--bundle` runs the same suite against dist/Code.gs, which is what actually
+// gets pasted into the Apps Script editor — so a bad concatenation order or a
+// stale bundle fails the build rather than reaching the editor.
+const sources = process.argv.includes('--bundle')
+  ? [__dirname + '/../dist/Code.gs']
+  : ['Config', 'Statuses', 'Log', 'Sheets', 'Surense', 'Notify', 'Main', 'Triggers']
+      .map(f => `${__dirname}/../apps-script/${f}.gs`);
+
+for (const file of sources) {
+  vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
 }
 
 const run = src => vm.runInContext(src, sandbox);

@@ -53,7 +53,12 @@ Apps Script שולח דרך Gmail, לא Outlook. `Notify.gs` מכיל את `send
 ## התקנה
 
 1. פתח את חוברת העבודה → **Extensions → Apps Script**
-2. מחק את `Code.gs` שנוצר אוטומטית, וצור קובץ לכל אחד מ-`apps-script/`:
+2. העתק את **[`dist/Code.gs`](dist/Code.gs)** — כל הקוד בקובץ אחד — לתוך `Code.gs` שנוצר אוטומטית, במקום התוכן הקיים.
+
+   <details>
+   <summary>או, אם אתה מעדיף קובץ לכל מודול</summary>
+
+   צור קובץ לכל אחד מ-`apps-script/`:
 
    | קובץ | תפקיד |
    |---|---|
@@ -65,6 +70,9 @@ Apps Script שולח דרך Gmail, לא Outlook. `Notify.gs` מכיל את `send
    | `Main.gs` | אלגוריתם הריצה (סעיף 7) |
    | `Triggers.gs` | התקנת הטריגר + `checkSetup()` |
    | `Log.gs` | יומן ריצה |
+
+   `dist/Code.gs` נבנה מהם אוטומטית: `python3 scripts/bundle.py`
+   </details>
 
 3. **Project Settings** → סמן *Show `appsscript.json`* והדבק את התוכן מהתיקייה
    (קובע `Asia/Jerusalem` — קריטי לבדיקת יום בשבוע)
@@ -147,10 +155,13 @@ var SEND_ON_STATUS = {
 ## בדיקות
 
 ```bash
-node test/run.js
+node test/run.js            # מול המודולים ב-apps-script/
+node test/run.js --bundle   # מול dist/Code.gs — מה שבאמת מודבק לעורך
 ```
 
 36 בדיקות שמריצות את קוד ה-`.gs` האמיתי מול stubs של Apps Script — בלי לגעת ב-Surense או בגיליון. מכוסים: סינון ימים לפי אזור זמן, הרשימה הסגורה, נרמול שמות, מניעת כפילויות, pagination, בלם ההצפה, ושמירת חותמת הזמן בכישלון.
+
+הרצת `--bundle` תופסת bundle מיושן או סדר שרשור שבור לפני שהם מגיעים לעורך.
 
 ---
 
