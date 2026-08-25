@@ -318,6 +318,8 @@ check('first run reports a baseline', stats.baseline, true);
 check('baseline does not claim leads are new', stats.added, 0);
 check('rows marked as baseline', rowById('1')[COL.type], 'בסיס');
 check('hash column hidden', mirror.hidden, 6);
+check('baseline writes no change-log lines',
+  !sheets['שינויים'] || sheets['שינויים'].data.length <= 1, true);
 
 // age the stamps so carry-forward is observable
 mirror.data.slice(1).forEach(r => { r[COL.stamp] = '2020-01-01 00:00:00'; });
@@ -343,6 +345,22 @@ check('untouched row keeps its old label', rowById('1')[COL.type], 'בסיס');
 check('new row marked', rowById('3')[COL.type], 'חדש');
 check('changed value actually written', rowById('2')[COL.status], 'לא עונה 3');
 
+// the change log records which field moved, not just that the row did
+const changeRows = () => (sheets['שינויים'] || { data: [[]] }).data.slice(1);
+const statusChange = changeRows().find(
+  r => r[1] === '2' && r[3] === 'סטטוס');
+check('change log names the column that moved', !!statusChange, true);
+check('change log records the old value', statusChange[4], 'לא ענה');
+check('change log records the new value', statusChange[5], 'לא עונה 3');
+check('change log records the new lead',
+  changeRows().some(r => r[1] === '3' && r[2] === 'חדש'), true);
+check('unchanged lead produces no change-log line',
+  changeRows().some(r => r[1] === '1'), false);
+
+const beforeQuietRun = changeRows().length;
+run('syncLeads()');
+check('a run with no changes logs nothing', changeRows().length, beforeQuietRun);
+
 // --- a lead disappears from the CRM ---
 fetchImpl = crmStub(FIELDS, [crmLead(1), crmLead(2, 'לא עונה 3')]);
 stats = run('syncLeads()');
@@ -350,6 +368,8 @@ check('missing lead counted once', stats.missing, 1);
 check('its row is kept, not deleted', !!rowById('3'), true);
 check('and flagged', rowById('3')[COL.type], 'לא נמצא ב-CRM');
 check('its CRM values are preserved', rowById('3')[COL.name], 'לקוח 3');
+check('disappearance recorded in the change log',
+  changeRows().some(r => r[1] === '3' && r[2] === 'לא נמצא ב-CRM'), true);
 
 const flaggedAt = rowById('3')[COL.stamp];
 stats = run('syncLeads()');
@@ -387,6 +407,17 @@ run('CONFIG.surense.maxPages = 40');
 fetchImpl = crmStub(FIELDS, []);
 check('empty CRM returns nothing', run('syncLeads()'), null);
 check('empty CRM leaves the mirror untouched', JSON.stringify(mirror.data), before);
+
+// a bulk CRM edit must not write tens of thousands of change-log lines
+run('CONFIG.mirror.changeLogMaxPerRun = 3');
+fetchImpl = crmStub(FIELDS, [crmLead(1), crmLead(2), crmLead(3), crmLead(4), crmLead(5)]);
+run('syncLeads()');                       // establishes rows 1-5
+fetchImpl = crmStub(FIELDS,
+  [1, 2, 3, 4, 5].map(i => crmLead(i, 'סטטוס חדש')));
+const beforeBulk = changeRows().length;
+run('syncLeads()');
+check('change log capped per run', changeRows().length - beforeBulk, 3);
+run('CONFIG.mirror.changeLogMaxPerRun = 500');
 
 // ------------------------------------------------------------- flattenValue_
 check('null becomes blank', run('flattenValue_(null)'), '');

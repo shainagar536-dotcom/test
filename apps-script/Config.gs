@@ -84,7 +84,12 @@ var CONFIG = {
     // What to do with a row whose lead the CRM no longer returns. Marking it
     // is the default: deleting a row cannot be undone, and a lead vanishing
     // is more often a changed filter or permission than a real deletion.
-    removeMissing: false
+    removeMissing: false,
+
+    // Running history of what changed, one line per field that moved.
+    changeLogTab: 'שינויים',
+    changeLogRetention: 5000,
+    changeLogMaxPerRun: 500
   },
 
   // -------------------------------------------------------------- schedule

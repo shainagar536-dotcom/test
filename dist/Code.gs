@@ -105,7 +105,12 @@ var CONFIG = {
     // What to do with a row whose lead the CRM no longer returns. Marking it
     // is the default: deleting a row cannot be undone, and a lead vanishing
     // is more often a changed filter or permission than a real deletion.
-    removeMissing: false
+    removeMissing: false,
+
+    // Running history of what changed, one line per field that moved.
+    changeLogTab: 'שינויים',
+    changeLogRetention: 5000,
+    changeLogMaxPerRun: 500
   },
 
   // -------------------------------------------------------------- schedule
@@ -1196,6 +1201,7 @@ function syncLeads() {
     var plan = buildRows_(columns, result.leads, existing);
 
     writeRows_(columns, plan.rows);
+    appendChangeLog_(plan.changes);
 
     var stats = plan.stats;
     stats.baseline = existing.baseline;
@@ -1206,7 +1212,8 @@ function syncLeads() {
       added: stats.added,
       updated: stats.updated,
       unchanged: stats.unchanged,
-      missingFromCrm: stats.missing
+      missingFromCrm: stats.missing,
+      changeLogRows: plan.changes.length
     });
 
     return stats;
@@ -1324,6 +1331,7 @@ function buildRows_(columns, leads, existing) {
 
   var stats = { added: 0, updated: 0, unchanged: 0, missing: 0 };
   var rows = [];
+  var changes = [];
   var seen = {};
 
   leads.forEach(function (lead) {
@@ -1344,10 +1352,16 @@ function buildRows_(columns, leads, existing) {
       timestamp = now;
       changeType = CHANGE.added;
       stats.added++;
+      changes.push([now, id, CHANGE.added, '', '', values.join(' | ')]);
     } else if (String(previous.hash) !== hash) {
       timestamp = now;
       changeType = CHANGE.updated;
       stats.updated++;
+
+      // Which fields moved, not just that the row did.
+      diffRow_(columns, previous.raw, values).forEach(function (diff) {
+        changes.push([now, id, CHANGE.updated, diff.column, diff.before, diff.after]);
+      });
     } else {
       // Untouched: keep the stamp from whenever this row last really changed.
       timestamp = previous.timestamp;
@@ -1385,11 +1399,89 @@ function buildRows_(columns, leads, existing) {
 
       if (!alreadyFlagged) {
         stats.missing++;
+        changes.push([now, id, CHANGE.missing, '', '', '']);
       }
     });
   }
 
-  return { rows: rows, stats: stats };
+  return { rows: rows, stats: stats, changes: changes };
+}
+
+/**
+ * Lists the columns whose value differs between the stored row and the fresh
+ * one, so the change log can say what moved rather than only that something
+ * did.
+ *
+ * @param {Array<{key: string, label: string}>} columns
+ * @param {Array} before  The row as it was read back from the sheet.
+ * @param {Array} after   The freshly flattened CRM values.
+ * @return {Array<{column: string, before: string, after: string}>}
+ */
+function diffRow_(columns, before, after) {
+  var diffs = [];
+
+  for (var i = 0; i < columns.length; i++) {
+    // A value Sheets would read as a formula was stored with a leading
+    // apostrophe, which the sheet does not display. Compare without it, or
+    // every such column would look changed on every run.
+    var was = stripLeadingQuote_(before[i]);
+    var now = stripLeadingQuote_(after[i]);
+
+    if (was !== now) {
+      diffs.push({ column: columns[i].label, before: was, after: now });
+    }
+  }
+
+  return diffs;
+}
+
+/**
+ * @param {*} value
+ * @return {string}
+ */
+function stripLeadingQuote_(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  return String(value).replace(/^'/, '');
+}
+
+/**
+ * Appends this run's changes to the change-log tab.
+ *
+ * The mirror tab shows the current state; this is the running history of how
+ * it got there — one line per field that moved.
+ *
+ * @param {Array<Array>} changes
+ */
+function appendChangeLog_(changes) {
+  if (!changes.length) {
+    return;
+  }
+
+  var capped = changes;
+
+  if (changes.length > CONFIG.mirror.changeLogMaxPerRun) {
+    // A bulk edit in the CRM should not write tens of thousands of lines.
+    capped = changes.slice(0, CONFIG.mirror.changeLogMaxPerRun);
+    logWarn_('Change log truncated: ' + changes.length + ' changes in one ' +
+      'run, logging the first ' + CONFIG.mirror.changeLogMaxPerRun + '.');
+  }
+
+  var sheet = getSheet_(CONFIG.workbookId, CONFIG.mirror.changeLogTab,
+    ['תאריך', 'מזהה ליד', 'סוג שינוי', 'עמודה', 'לפני', 'אחרי']);
+
+  var start = Math.max(sheet.getLastRow() + 1, 2);
+
+  growGrid_(sheet, start + capped.length - 1, 6);
+  sheet.getRange(start, 1, capped.length, 6).setValues(capped);
+
+  var excess = (sheet.getLastRow() - 1) - CONFIG.mirror.changeLogRetention;
+
+  if (excess > 0) {
+    sheet.deleteRows(2, excess);
+  }
 }
 
 /**
