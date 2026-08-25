@@ -45,6 +45,10 @@ var CONFIG = {
   // --------------------------------------------------------------- surense
   surense: {
     tokenUrl: 'https://api.surense.com/oauth/token',
+
+    // The token's "aud" claim names https://www.surense.com/api/v1 while the
+    // integration notes say api.surense.com. Confirmed by diagnoseApi against
+    // a live call; switch this if that host is the one that answers.
     apiBase: 'https://api.surense.com/api/v1',
     pageSize: 50,          // hard API limit
     maxPages: 40           // stops a runaway pagination loop

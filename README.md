@@ -188,6 +188,25 @@ Apps Script שולח דרך Gmail, לא Outlook. `Notify.gs` מכיל את `send
 11. מלא את לשונית `מיפוי` בכתובות מייל
 12. `dryRun()` → בדוק את לשונית `יומן` → `CONFIG.dryRun = false` → `installNotifierTrigger()`
 
+## מה שאומת מול ה-API האמיתי
+
+| נבדק | תוצאה |
+|---|---|
+| `POST /oauth/token` | **עובד.** מחזיר JWT, תקף לשעה |
+| ספק הזהות | Auth0 (`iss: auth.surense.com`) |
+| scopes | `leads:read` · `leads:source:update` · `leads:update` · `leads:agency:update` · `offline_access` |
+| `aud` בטוקן | `https://www.surense.com/api/v1` — **לא** `api.surense.com` |
+
+`leads:read` קיים, ולכן המראה מכוסה.
+
+### שתי נקודות שעולות מזה
+
+**כתובת ה-API לא ודאית.** ה-`aud` מצביע על `www.surense.com` בעוד המסמך אומר `api.surense.com`. `diagnoseApi()` ו-`diagnose.ps1` מנסים את שתיהן ומדווחים איזו עונה.
+
+**האישורים חזקים מהנדרש.** הטוקן נושא שלוש הרשאות כתיבה (`leads:update`, `leads:source:update`, `leads:agency:update`) שהקוד הזה לא משתמש בהן ולעולם לא יקרא להן. אם Surense מאפשרת להנפיק client עם `leads:read` בלבד — כדאי. אז גם באג או שינוי עתידי בקוד לא יוכלו לשנות שום דבר ב-CRM, במקום להסתמך על כך שהקוד מתנהג יפה.
+
+---
+
 ## אם משהו לא עובד מול ה-API
 
 `diagnoseApi()` — מריץ את החיבור שלב-שלב ואומר בדיוק מה נכשל ולמה. הוא **לא זורק שגיאה**: כל שלב מדווח על עצמו, כך שכישלון באמצע לא מסתיר את מה שאחריו.

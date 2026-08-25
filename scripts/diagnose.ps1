@@ -24,7 +24,15 @@ param(
     [Parameter(Mandatory = $true)][string]$ClientId,
     [Parameter(Mandatory = $true)][string]$ClientSecret,
     [string]$TokenUrl = 'https://api.surense.com/oauth/token',
-    [string]$ApiBase  = 'https://api.surense.com/api/v1'
+
+    # Both candidates are tried in order and the first that answers wins.
+    # The token's "aud" claim names www.surense.com while the integration
+    # notes say api.surense.com, and only a live call settles which serves
+    # the API.
+    [string[]]$ApiBase = @(
+        'https://api.surense.com/api/v1',
+        'https://www.surense.com/api/v1'
+    )
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,7 +76,7 @@ function Get-HttpError {
 
 Write-Host "Surense API check" -ForegroundColor White
 Write-Host "  token endpoint : $TokenUrl"
-Write-Host "  api base       : $ApiBase"
+Write-Host "  api bases      : $($ApiBase -join ', ')"
 Write-Host "  client id      : $($ClientId.Substring(0, [Math]::Min(8, $ClientId.Length)))..."
 
 # --- 1. token --------------------------------------------------------------
@@ -120,11 +128,34 @@ if ($parts.Count -eq 3) {
 
 $headers = @{ Authorization = "Bearer $token" }
 
-# --- 2. field schema -------------------------------------------------------
-Write-Step '2. GET /leads/fields'
+# --- 2. which base actually serves the API ---------------------------------
+Write-Step '2. Finding the API base'
+
+$base = $null
+
+foreach ($candidate in $ApiBase) {
+    try {
+        Invoke-RestMethod -Uri "$candidate/leads/fields" -Headers $headers | Out-Null
+        Write-Ok "$candidate answered"
+        $base = $candidate
+        break
+    } catch {
+        Write-Host "  --   $candidate : $(Get-HttpError $_)" -ForegroundColor DarkGray
+    }
+}
+
+if (-not $base) {
+    Write-Bad 'No candidate base answered. Check the API host with Surense.'
+    exit 1
+}
+
+Write-Host "`n  Use this in CONFIG.surense.apiBase : $base" -ForegroundColor White
+
+# --- 3. field schema -------------------------------------------------------
+Write-Step '3. GET /leads/fields'
 
 try {
-    $fields = Invoke-RestMethod -Uri "$ApiBase/leads/fields" -Headers $headers
+    $fields = Invoke-RestMethod -Uri "$base/leads/fields" -Headers $headers
 
     # The array may be bare or wrapped; try the usual envelope keys.
     $list = $fields
@@ -150,11 +181,11 @@ try {
     Write-Bad (Get-HttpError $_)
 }
 
-# --- 3. lead search --------------------------------------------------------
-Write-Step '3. POST /leads/search'
+# --- 4. lead search --------------------------------------------------------
+Write-Step '4. POST /leads/search'
 
 try {
-    $search = Invoke-RestMethod -Method Post -Uri "$ApiBase/leads/search" `
+    $search = Invoke-RestMethod -Method Post -Uri "$base/leads/search" `
         -Headers $headers -ContentType 'application/json' `
         -Body '{"startRow":0,"endRow":1,"filters":[]}'
 
@@ -185,11 +216,11 @@ try {
     Write-Bad (Get-HttpError $_)
 }
 
-# --- 4. total count --------------------------------------------------------
-Write-Step '4. How many leads are there'
+# --- 5. total count --------------------------------------------------------
+Write-Step '5. How many leads are there'
 
 try {
-    $page = Invoke-RestMethod -Method Post -Uri "$ApiBase/leads/search" `
+    $page = Invoke-RestMethod -Method Post -Uri "$base/leads/search" `
         -Headers $headers -ContentType 'application/json' `
         -Body '{"startRow":0,"endRow":50,"filters":[]}'
 
