@@ -11,7 +11,7 @@ import os
 
 # Load order matters: Config defines CONFIG, which the rest read at call time.
 MODULES = ['Config', 'Statuses', 'Log', 'Sheets', 'Surense', 'Notify',
-           'Main', 'Mirror', 'Diff', 'Triggers']
+           'Main', 'Mirror', 'Diff', 'Diagnose', 'Triggers']
 
 HEADER = """/**
  * אוטומציית התראות על שינוי סטטוס ליד — Surense CRM

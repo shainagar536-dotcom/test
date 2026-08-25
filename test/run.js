@@ -74,6 +74,8 @@ const sandbox = {
   console: { log: () => {}, warn: () => {}, error: () => {} },
   Utilities: {
     formatDate: fmt,
+    base64DecodeWebSafe: t => Buffer.from(t, 'base64url'),
+    newBlob: b => ({ getDataAsString: () => Buffer.from(b).toString('utf8') }),
     DigestAlgorithm: { MD5: 'MD5' },
     Charset: { UTF_8: 'utf8' },
     computeDigest: (_a, text) =>
@@ -107,7 +109,7 @@ vm.createContext(sandbox);
 const sources = process.argv.includes('--bundle')
   ? [__dirname + '/../dist/Code.gs']
   : ['Config', 'Statuses', 'Log', 'Sheets', 'Surense', 'Notify', 'Main',
-     'Mirror', 'Diff', 'Triggers']
+     'Mirror', 'Diff', 'Diagnose', 'Triggers']
       .map(f => `${__dirname}/../apps-script/${f}.gs`);
 
 for (const file of sources) {
@@ -450,6 +452,52 @@ mirror.data = [['מזהה'], ['1'], ['2']];
 const small = run('reportMissingLeads()');
 check('short sheet still matches on the id column',
   small.missing.map(l => l.id), ['3', '4']);
+
+
+
+// ---------------------------------------------------------------- diagnose
+// A JWT payload {"scope":"leads:read leads:update"}
+const jwt = 'h.' + Buffer.from('{"scope":"leads:read leads:update"}')
+  .toString('base64url') + '.sig';
+check('scopes read out of a JWT token',
+  run(`tokenScopes_(${JSON.stringify(jwt)})`), 'leads:read leads:update');
+check('an opaque token yields no scopes',
+  run('tokenScopes_("csk_plain_opaque_token")'), null);
+check('a malformed token does not throw',
+  run('tokenScopes_("a.!!!notbase64!!!.c")'), null);
+
+// missing credentials: reported, never thrown
+const savedId = props.SURENSE_CLIENT_ID;
+delete props.SURENSE_CLIENT_ID;
+let diag = run('diagnoseApi()');
+check('missing credential reported, not thrown', /MISSING/.test(diag), true);
+check('diagnosis stops before calling out', /POST https/.test(diag), false);
+props.SURENSE_CLIENT_ID = savedId;
+
+// a rejected token is reported with the cause, and does not throw
+fetchImpl = () => ({ getResponseCode: () => 401,
+  getContentText: () => '{"error":"invalid_client"}' });
+diag = run('diagnoseApi()');
+check('rejected token reported', /HTTP 401/.test(diag), true);
+check('rejection lists causes to check', /rotated/.test(diag), true);
+check('the secret is never printed', diag.includes('shh'), false);
+
+// a network failure is caught rather than thrown
+fetchImpl = () => { throw new Error('DNS failure'); };
+diag = run('diagnoseApi()');
+check('network failure reported, not thrown', /NETWORK ERROR/.test(diag), true);
+
+// a healthy run compares the response against CONFIG.leadFields
+fetchImpl = (url, options) => {
+  if (/oauth/.test(url)) return json({ access_token: jwt, expires_in: 3600 });
+  if (/fields/.test(url)) return json({ fields: [{ key: 'id', label: 'מזהה' }] });
+  return json({ rows: [{ id: '1', name: 'א', statusName: 'לא ענה' }] });
+};
+diag = run('diagnoseApi()');
+check('present field confirmed', /clientName -> "name" : found/.test(diag), true);
+check('absent field called out',
+  /statusDate -> "statusDate" : NOT FOUND/.test(diag), true);
+check('scopes surfaced in the report', /leads:read/.test(diag), true);
 
 
 console.log(`\n${pass} passed, ${fail} failed`);
