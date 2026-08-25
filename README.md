@@ -333,3 +333,60 @@ node test/run.js --bundle   # מול dist/Code.gs — מה שבאמת מודבק
 ## מה עוד פתוח מסעיף 12
 
 נוסחי 34 הסטטוסים · URL ותוכן גיליון המיפוי · תיבת Outlook השולחת · נוסח החתימה · דוח סיכום יומי · ספק וואטספ לשלב ב'
+
+---
+
+## אפשרות ב': סקריפט שרץ אצלך במחשב
+
+אם אתה מעדיף לא לעבור דרך Apps Script — `scripts/sync-leads.ps1` עושה את אותו דבר מהמחשב שלך, בלי שום הרשאות Google.
+
+```powershell
+.\sync-leads.ps1 -ClientId cid_NpUMsHGD80q0izlhEQnfoA -ClientSecret <הסוד>
+```
+
+נוצרים שני קבצים ליד הסקריפט:
+
+| קובץ | מה יש בו |
+|---|---|
+| `leads.csv` | כל הלידים + `עודכן` + `סוג שינוי` — נפתח ישירות באקסל |
+| `leads-changes.csv` | היסטוריה: שורה לכל שדה שזז |
+
+הקובץ נכתב ב-UTF-8 עם BOM כדי שאקסל יציג עברית נכון. `leads.csv.bak` נשמר בכל ריצה.
+
+**לבדיקה בלי לכתוב כלום:** הוסף `-WhatIf`.
+
+### תזמון כל שעה, 08:00–20:00, ראשון–שישי
+
+הרץ פעם אחת ב-PowerShell **כמנהל**:
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
+  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\surense\sync-leads.ps1" -ClientId cid_NpUMsHGD80q0izlhEQnfoA -ClientSecret <הסוד>'
+$trigger = New-ScheduledTaskTrigger -Daily -At 08:00
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At 08:00 `
+  -RepetitionInterval (New-TimeSpan -Hours 1) `
+  -RepetitionDuration (New-TimeSpan -Hours 12)).Repetition
+
+Register-ScheduledTask -TaskName 'Surense sync' -Action $action -Trigger $trigger `
+  -Description 'מושך לידים מ-Surense ומעדכן את leads.csv'
+```
+
+לסינון ימים (בלי שבת): Task Scheduler → Triggers → Weekly → סמן ראשון עד שישי.
+
+> הסוד נשמר בהגדרות המשימה. במחשב משותף עדיף Apps Script, ששומר אותו ב-Script Properties.
+
+### מה נבדק בפועל
+
+הסקריפט הורץ מקצה לקצה מול CRM מדומה — לא רק נקרא:
+
+| תרחיש | תוצאה |
+|---|---|
+| ריצה ראשונה | 10 שורות, כולן `בסיס` |
+| שני שדות זזו | `עודכנו: 2`, שאר החותמות לא זזו |
+| ליד חדש | `חדשים: 1` |
+| ליד נעלם | נשמר ומסומן, לא נמחק |
+| ריצה שקטה | `ללא שינוי: 10`, אף חותמת לא השתנתה |
+| סוד שגוי | `HTTP 401`, יציאה בקוד 1, הקובץ לא נגע |
+| CRM החזיר אפס | סירב לכתוב, הקובץ לא נגע |
+
+שני באגים אמיתיים נתפסו בהרצה ותוקנו: `if` כביטוי מוטבע (לא נתמך ב-PowerShell 5.1), וגוף שגיאת HTTP שנקרא אחרת ב-5.1 מול 7. באג שלישי נתפס מהפלט — PowerShell המיר תאריכי ISO ל-`[datetime]` ואז לפורמט לפי שפת המחשב, כך שאותו ערך היה נראה אחרת בווינדוס עברי ואנגלי והחתימה הייתה משתנה איתו. הפורמט מקובע עכשיו.

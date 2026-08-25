@@ -1,0 +1,8 @@
+# Simulation and demo output — regenerate with scripts/simulate.js
+simulation.json
+demo*.csv
+
+# Output of scripts/sync-leads.ps1
+leads.csv
+leads.csv.bak
+leads-changes.csv
