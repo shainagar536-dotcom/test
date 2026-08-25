@@ -65,6 +65,23 @@ var CONFIG = {
     sourceName: 'sourceName'
   },
 
+  // ---------------------------------------------------------------- mirror
+  mirror: {
+    // The tab the CRM copy is written to, addressed by gid so a rename does
+    // not break it. Set to null to address it by name instead.
+    sheetGid: 737522327,
+    tabName: 'לידים',
+
+    // Columns to mirror. Empty means "whatever /leads/fields reports", so a
+    // field added in the CRM appears here on its own. Supply a list of keys
+    // (or {key, label} pairs) to mirror a chosen subset instead.
+    columns: [],
+
+    // Apps Script kills an execution at 6 minutes. Paging stops at this many
+    // seconds so the run ends on its own terms and reports why.
+    timeBudgetSeconds: 300
+  },
+
   // -------------------------------------------------------------- schedule
   timezone: 'Asia/Jerusalem',
   activeDays: [0, 1, 2, 3, 4, 5],   // 0 = Sunday ... 6 = Saturday

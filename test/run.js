@@ -18,8 +18,18 @@ function fmt(date, tz, pattern) {
 }
 
 class FakeSheet {
-  constructor(name, data) { this.name = name; this.data = data; }
+  constructor(name, data, gid) {
+    this.name = name; this.data = data; this.gid = gid ?? 0;
+    this._maxRows = 1000; this._maxCols = 26;
+  }
   getName() { return this.name; }
+  getSheetId() { return this.gid; }
+  getMaxRows() { return this._maxRows; }
+  getMaxColumns() { return this._maxCols; }
+  insertRowsAfter(_a, n) { this._maxRows += n; }
+  insertColumnsAfter(_a, n) { this._maxCols += n; }
+  clearContents() { this.data = []; }
+  clear() { this.data = []; }
   getLastRow() { return this.data.length; }
   getLastColumn() { return this.data.reduce((m, r) => Math.max(m, r.length), 0); }
   setFrozenRows() {} hideSheet() {}
@@ -51,7 +61,8 @@ const sheets = {
     ['בלי מייל', '', '+97250', 'כן']
   ]),
   'מצב': new FakeSheet('מצב', [['מספר ליד', 'סטטוס אחרון שדווח', 'תאריך דיווח']]),
-  'יומן': new FakeSheet('יומן', [['תאריך', 'רמה', 'הודעה', 'פירוט']])
+  'יומן': new FakeSheet('יומן', [['תאריך', 'רמה', 'הודעה', 'פירוט']]),
+  'לידים': new FakeSheet('לידים', [], 737522327)
 };
 
 const props = { SURENSE_CLIENT_ID: 'cid', SURENSE_CLIENT_SECRET: 'shh' };
@@ -72,6 +83,7 @@ const sandbox = {
   LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
   SpreadsheetApp: {
     openById: () => ({
+      getSheets: () => Object.values(sheets),
       getSheetByName: n => sheets[n] || null,
       insertSheet: n => (sheets[n] = new FakeSheet(n, []))
     })
@@ -86,7 +98,8 @@ vm.createContext(sandbox);
 // stale bundle fails the build rather than reaching the editor.
 const sources = process.argv.includes('--bundle')
   ? [__dirname + '/../dist/Code.gs']
-  : ['Config', 'Statuses', 'Log', 'Sheets', 'Surense', 'Notify', 'Main', 'Triggers']
+  : ['Config', 'Statuses', 'Log', 'Sheets', 'Surense', 'Notify', 'Main',
+     'Mirror', 'Diff', 'Triggers']
       .map(f => `${__dirname}/../apps-script/${f}.gs`);
 
 for (const file of sources) {
@@ -241,6 +254,104 @@ props.LAST_RUN_AT = '2026-08-17T09:00:00Z';
 fetchImpl = () => ({ getResponseCode: () => 401, getContentText: () => 'denied' });
 try { run('runAutomation_({trigger:"test"})'); } catch (e) { /* expected */ }
 check('failed run keeps the watermark', props.LAST_RUN_AT, '2026-08-17T09:00:00Z');
+
+
+// ------------------------------------------------------------------ mirror
+const json = o => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify(o) });
+const crmStub = (fields, rows) => (url, options) => {
+  if (/oauth/.test(url)) return json({ access_token: 't', expires_in: 3600 });
+  if (/\/leads\/fields/.test(url)) return json({ fields });
+  if (/\/leads\/search/.test(url)) {
+    const body = JSON.parse(options.payload);
+    return json({
+      rows: rows.slice(body.startRow, body.endRow),
+      hasNextPage: body.endRow < rows.length
+    });
+  }
+  throw new Error('unexpected url: ' + url);
+};
+
+const FIELDS = [
+  { key: 'id', label: 'מזהה' },
+  { key: 'name', label: 'שם' },
+  { key: 'status', label: 'סטטוס' }
+];
+const crmLead = id => ({
+  id: String(id), name: 'לקוח ' + id,
+  status: { id: 's' + id, name: 'לא ענה' }   // nested, as CRMs usually send
+});
+
+const mirror = sheets['לידים'];
+fetchImpl = crmStub(FIELDS, [crmLead(1), crmLead(2)]);
+run('syncLeads()');
+check('headers come from the CRM schema', mirror.data[0], ['מזהה', 'שם', 'סטטוס']);
+check('nested object flattened to its name', mirror.data[1][2], 'לא ענה');
+check('every lead written', mirror.data.length, 3);
+
+// a full replace, not an append: a lead gone from the CRM leaves the sheet
+fetchImpl = crmStub(FIELDS, [crmLead(2)]);
+run('syncLeads()');
+check('sync replaces rather than appends', mirror.data.length, 2);
+check('remaining row is the surviving lead', mirror.data[1][0], '2');
+
+// explicit column list overrides schema discovery
+run(`CONFIG.mirror.columns = [{key:'id',label:'ID'},{key:'name',label:'Name'}]`);
+run('syncLeads()');
+check('explicit columns win', mirror.data[0], ['ID', 'Name']);
+run('CONFIG.mirror.columns = []');
+
+// the grid is expanded past the default 1000 rows before writing
+const many = Array.from({ length: 1200 }, (_, i) => crmLead(i + 1));
+fetchImpl = crmStub(FIELDS, many);
+run('CONFIG.surense.maxPages = 40');
+run('syncLeads()');
+check('grid grown for a large pull', mirror.getMaxRows() >= 1201, true);
+check('all 1200 leads written', mirror.data.length, 1201);
+
+// a truncated read must not be written as if it were the whole CRM
+const before = JSON.stringify(mirror.data);
+run('CONFIG.surense.maxPages = 1');
+run('syncLeads()');
+check('partial read leaves the mirror untouched', JSON.stringify(mirror.data), before);
+run('CONFIG.surense.maxPages = 40');
+
+// an empty response is treated as suspect, not as "delete everything"
+fetchImpl = crmStub(FIELDS, []);
+run('syncLeads()');
+check('empty CRM leaves the mirror untouched', JSON.stringify(mirror.data), before);
+
+// ------------------------------------------------------------- flattenValue_
+check('null becomes blank', run('flattenValue_(null)'), '');
+check('number stays a number', run('flattenValue_(42)'), 42);
+check('object without a name falls back to JSON',
+  run('flattenValue_({a:1})'), '{"a":1}');
+check('array joined', run('flattenValue_(["a","b"])'), 'a, b');
+check('leading = escaped so Sheets keeps it as text',
+  run('flattenValue_("=SUM(A1)")'), "'=SUM(A1)");
+
+// --------------------------------------------------------------- gap report
+mirror.data = [['מזהה', 'שם'], ['1', 'א'], ['2', 'ב'], ['99', 'כבר לא ב-CRM']];
+fetchImpl = crmStub(FIELDS, [crmLead(1), crmLead(2), crmLead(3), crmLead(4)]);
+const diff = run('reportMissingLeads()');
+check('leads absent from the sheet found', diff.missing.map(l => l.id), ['3', '4']);
+check('sheet rows with no CRM match found', diff.stale, ['99']);
+check('matched rows counted', diff.matched, 2);
+check('report written to its own tab',
+  sheets['דוח פערים'].data[0][0], 'סוג');
+check('the leads tab was not modified by the report', mirror.data.length, 4);
+
+// a column of names must not be mistaken for the id column
+mirror.data = [['שם', 'הערה'], ['אבי', 'x'], ['בני', 'y']];
+const noKey = run('reportMissingLeads()');
+check('no id column found -> every lead reported missing', noKey.missing.length, 4);
+check('nothing reported stale when no id column matched', noKey.stale, []);
+
+// a short sheet still matches: rate, not count, decides
+mirror.data = [['מזהה'], ['1'], ['2']];
+const small = run('reportMissingLeads()');
+check('short sheet still matches on the id column',
+  small.missing.map(l => l.id), ['3', '4']);
+
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

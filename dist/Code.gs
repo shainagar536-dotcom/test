@@ -86,6 +86,23 @@ var CONFIG = {
     sourceName: 'sourceName'
   },
 
+  // ---------------------------------------------------------------- mirror
+  mirror: {
+    // The tab the CRM copy is written to, addressed by gid so a rename does
+    // not break it. Set to null to address it by name instead.
+    sheetGid: 737522327,
+    tabName: 'לידים',
+
+    // Columns to mirror. Empty means "whatever /leads/fields reports", so a
+    // field added in the CRM appears here on its own. Supply a list of keys
+    // (or {key, label} pairs) to mirror a chosen subset instead.
+    columns: [],
+
+    // Apps Script kills an execution at 6 minutes. Paging stops at this many
+    // seconds so the run ends on its own terms and reports why.
+    timeBudgetSeconds: 300
+  },
+
   // -------------------------------------------------------------- schedule
   timezone: 'Asia/Jerusalem',
   activeDays: [0, 1, 2, 3, 4, 5],   // 0 = Sunday ... 6 = Saturday
@@ -427,17 +444,14 @@ function getSheet_(workbookId, name, headers) {
 // ======================================================================
 
 /**
- * Surense CRM client: OAuth token plus the paginated lead search.
+ * Surense CRM client: OAuth token, the paginated lead search, and the
+ * field-schema lookup.
  *
- * Surense has no webhooks, so the automation polls: every run asks for the
- * leads whose statusDate moved since the previous run.
+ * Surense has no webhooks, so everything here is pull-based.
  */
 
 /**
  * Fetches an access token, reusing the cached one until it is nearly expired.
- *
- * Tokens are valid for an hour and the automation runs hourly, so the cache
- * mostly matters for retries and manual runs within the same hour.
  *
  * @return {string}
  */
@@ -450,16 +464,14 @@ function getAccessToken_() {
   }
 
   // The token endpoint rejects JSON — it requires form encoding.
-  var payload = {
-    grant_type: 'client_credentials',
-    client_id: secret_('SURENSE_CLIENT_ID'),
-    client_secret: secret_('SURENSE_CLIENT_SECRET')
-  };
-
   var response = UrlFetchApp.fetch(CONFIG.surense.tokenUrl, {
     method: 'post',
     contentType: 'application/x-www-form-urlencoded',
-    payload: payload,
+    payload: {
+      grant_type: 'client_credentials',
+      client_id: secret_('SURENSE_CLIENT_ID'),
+      client_secret: secret_('SURENSE_CLIENT_SECRET')
+    },
     muteHttpExceptions: true
   });
 
@@ -482,50 +494,88 @@ function getAccessToken_() {
 }
 
 /**
- * Returns every lead whose status changed after `since`, following pagination
- * to the end.
+ * Makes an authenticated API call and returns the parsed body.
  *
- * @param {Date} since
- * @return {Array<Object>} raw lead objects as returned by the API
+ * @param {string} method  'get' or 'post'
+ * @param {string} path    Path below the API base, e.g. '/leads/search'
+ * @param {Object=} body   JSON payload, for POST
+ * @return {Object}
  */
-function fetchLeadsChangedSince_(since) {
-  var token = getAccessToken_();
-  var sinceIso = Utilities.formatDate(
-    since, 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'");
+function surenseRequest_(method, path, body) {
+  var options = {
+    method: method,
+    headers: { Authorization: 'Bearer ' + getAccessToken_() },
+    muteHttpExceptions: true
+  };
+
+  if (body) {
+    options.contentType = 'application/json';
+    options.payload = JSON.stringify(body);
+  }
+
+  var response = UrlFetchApp.fetch(CONFIG.surense.apiBase + path, options);
+  var code = response.getResponseCode();
+
+  if (code !== 200) {
+    throw new Error(method.toUpperCase() + ' ' + path + ' failed (HTTP ' +
+      code + '): ' + response.getContentText().slice(0, 500));
+  }
+
+  return JSON.parse(response.getContentText());
+}
+
+/**
+ * Pulls the rows array out of a search response.
+ *
+ * The exact envelope key has not been confirmed against a live response, so
+ * the common shapes are all accepted. previewApi() reports which one is real.
+ *
+ * @param {Object} parsed
+ * @return {Array<Object>}
+ */
+function extractRows_(parsed) {
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  return parsed.rows || parsed.data || parsed.results || parsed.items ||
+    parsed.leads || [];
+}
+
+/**
+ * Runs a paginated lead search, following pages to the end.
+ *
+ * @param {Array<Object>} filters   Search filters, possibly empty.
+ * @param {Object=} options         {deadline: Date, onPage: function}
+ * @return {{leads: Array<Object>, complete: boolean}}
+ */
+function searchLeads_(filters, options) {
+  options = options || {};
 
   var leads = [];
   var startRow = 0;
 
   for (var page = 0; page < CONFIG.surense.maxPages; page++) {
-    var body = {
+    if (options.deadline && new Date() > options.deadline) {
+      logWarn_('Stopped paginating at the time budget.', {
+        pagesRead: page, leadsSoFar: leads.length
+      });
+      return { leads: leads, complete: false };
+    }
+
+    var parsed = surenseRequest_('post', '/leads/search', {
       startRow: startRow,
       endRow: startRow + CONFIG.surense.pageSize,
       sorts: [{ field: 'statusDate', dir: 'asc' }],
-      filters: [{
-        field: 'statusDate',
-        operator: 'greaterThan',
-        value: sinceIso
-      }]
-    };
+      filters: filters || []
+    });
 
-    var response = UrlFetchApp.fetch(
-      CONFIG.surense.apiBase + '/leads/search', {
-        method: 'post',
-        contentType: 'application/json',
-        headers: { Authorization: 'Bearer ' + token },
-        payload: JSON.stringify(body),
-        muteHttpExceptions: true
-      });
-
-    if (response.getResponseCode() !== 200) {
-      throw new Error('Lead search failed (HTTP ' +
-        response.getResponseCode() + '): ' + response.getContentText());
-    }
-
-    var parsed = JSON.parse(response.getContentText());
-    var batch = parsed.rows || parsed.data || parsed.results || [];
-
+    var batch = extractRows_(parsed);
     leads = leads.concat(batch);
+
+    if (options.onPage) {
+      options.onPage(leads.length);
+    }
 
     // Trust hasNextPage when the API sends it; otherwise a short page is the
     // end. Either way maxPages stops an unbounded loop.
@@ -534,36 +584,85 @@ function fetchLeadsChangedSince_(since) {
       : batch.length === CONFIG.surense.pageSize;
 
     if (!hasNext || !batch.length) {
-      return leads;
+      return { leads: leads, complete: true };
     }
 
     startRow += CONFIG.surense.pageSize;
   }
 
-  logWarn_('Pagination stopped at the ' + CONFIG.surense.maxPages +
-    '-page cap; some leads may not have been read.', { collected: leads.length });
+  logWarn_('Pagination hit the ' + CONFIG.surense.maxPages + '-page cap.',
+    { collected: leads.length });
 
-  return leads;
+  return { leads: leads, complete: false };
 }
 
 /**
- * Pulls the fields the automation needs out of a raw lead, using the names in
+ * Every lead whose status changed after `since`. Used by the notifier.
+ *
+ * @param {Date} since
+ * @return {Array<Object>}
+ */
+function fetchLeadsChangedSince_(since) {
+  return searchLeads_([{
+    field: 'statusDate',
+    operator: 'greaterThan',
+    value: Utilities.formatDate(since, 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'")
+  }]).leads;
+}
+
+/**
+ * Every lead in the CRM. Used by the mirror.
+ *
+ * @param {Object=} options  {deadline: Date, onPage: function}
+ * @return {{leads: Array<Object>, complete: boolean}}
+ */
+function fetchAllLeads_(options) {
+  return searchLeads_([], options);
+}
+
+/**
+ * The CRM's field definitions, including custom fields.
+ *
+ * Reading the schema from the CRM rather than hardcoding column names means
+ * a field added in Surense shows up in the mirror without a code change.
+ *
+ * @return {Array<{key: string, label: string}>}
+ */
+function fetchLeadFields_() {
+  var parsed = surenseRequest_('get', '/leads/fields');
+  var raw = extractRows_(parsed).length ? extractRows_(parsed) : (parsed.fields || []);
+
+  return raw.map(function (field) {
+    if (typeof field === 'string') {
+      return { key: field, label: field };
+    }
+
+    var key = field.key || field.name || field.field || field.id;
+
+    return {
+      key: String(key),
+      label: String(field.label || field.title || field.displayName || key)
+    };
+  }).filter(function (field) {
+    return field.key && field.key !== 'undefined';
+  });
+}
+
+/**
+ * Pulls the fields the notifier needs out of a raw lead, using the names in
  * CONFIG.leadFields so a naming mismatch is a config fix, not a code change.
  *
  * @param {Object} raw
- * @return {{id: string, displayId: string, clientName: string,
- *           statusName: string, statusDate: string, sourceName: string}}
+ * @return {Object}
  */
 function normalizeLead_(raw) {
   var f = CONFIG.leadFields;
 
   var pick = function (name, fallbacks) {
-    if (raw[name] !== undefined && raw[name] !== null && raw[name] !== '') {
-      return raw[name];
-    }
+    var candidates = [name].concat(fallbacks);
 
-    for (var i = 0; i < fallbacks.length; i++) {
-      var value = raw[fallbacks[i]];
+    for (var i = 0; i < candidates.length; i++) {
+      var value = raw[candidates[i]];
       if (value !== undefined && value !== null && value !== '') {
         return value;
       }
@@ -952,77 +1051,604 @@ function localDayIndex_(date) {
 
 
 // ======================================================================
+// Mirror.gs
+// ======================================================================
+
+/**
+ * The mirror: a full copy of the CRM's leads in a spreadsheet tab.
+ *
+ * Every run replaces the tab's contents outright rather than patching rows.
+ * A full replace is self-healing — a lead deleted in the CRM disappears here,
+ * an edited field is simply correct again, and no drift can accumulate. The
+ * cost is re-reading everything each hour, which at a few thousand leads is
+ * well inside what Apps Script allows.
+ *
+ * Columns come from the CRM's own field schema, so a field added in Surense
+ * appears in the mirror without a code change.
+ */
+
+/**
+ * Reports what the API actually returns, without writing anything.
+ *
+ * Run this first. The response shapes could not be checked while the code was
+ * written — the environment it was written in has no route to the API — so
+ * this is what confirms the field names and the response envelope before the
+ * first real sync touches the sheet.
+ */
+function previewApi() {
+  var lines = [];
+
+  try {
+    getAccessToken_();
+    lines.push('✓ Authentication succeeded.');
+  } catch (err) {
+    console.log('✗ Authentication failed: ' + err.message);
+    return;
+  }
+
+  try {
+    var fields = fetchLeadFields_();
+    lines.push('✓ /leads/fields returned ' + fields.length + ' field(s).');
+    lines.push('  ' + fields.slice(0, 40).map(function (f) {
+      return f.key + (f.label !== f.key ? ' (' + f.label + ')' : '');
+    }).join(', '));
+  } catch (err) {
+    lines.push('✗ /leads/fields failed: ' + err.message);
+  }
+
+  try {
+    var parsed = surenseRequest_('post', '/leads/search',
+      { startRow: 0, endRow: 1, filters: [] });
+
+    lines.push('✓ /leads/search responded.');
+    lines.push('  envelope keys: ' + Object.keys(parsed).join(', '));
+
+    var rows = extractRows_(parsed);
+    lines.push('  rows found: ' + rows.length);
+
+    if (rows.length) {
+      lines.push('  first lead keys: ' + Object.keys(rows[0]).join(', '));
+      lines.push('  first lead: ' + JSON.stringify(rows[0]).slice(0, 1500));
+    }
+  } catch (err) {
+    lines.push('✗ /leads/search failed: ' + err.message);
+  }
+
+  console.log(lines.join('\n'));
+  logInfo_('previewApi', { report: lines.join(' | ').slice(0, 4000) });
+}
+
+/** Entry point for the mirror's hourly trigger. */
+function hourlyMirror() {
+  var now = new Date();
+
+  if (!isWithinSchedule_(now)) {
+    console.log('Outside the configured window — skipping.');
+    return;
+  }
+
+  syncLeads();
+}
+
+/**
+ * Replaces the mirror tab with the current contents of the CRM.
+ */
+function syncLeads() {
+  var lock = LockService.getScriptLock();
+
+  if (!lock.tryLock(30 * 1000)) {
+    logWarn_('A mirror sync is already running — skipping.');
+    return;
+  }
+
+  var startedAt = new Date();
+
+  try {
+    var deadline = new Date(
+      startedAt.getTime() + CONFIG.mirror.timeBudgetSeconds * 1000);
+
+    var columns = resolveColumns_();
+    var result = fetchAllLeads_({ deadline: deadline });
+
+    if (!result.leads.length) {
+      logWarn_('The CRM returned no leads — the mirror was left untouched.');
+      return;
+    }
+
+    // A truncated read must not be written as if it were the whole CRM:
+    // replacing the tab with a partial pull would look like mass deletion.
+    if (!result.complete) {
+      logError_('Read incomplete (' + result.leads.length + ' leads) — the ' +
+        'mirror was left untouched to avoid writing a partial copy.', {
+        hint: 'Raise CONFIG.surense.maxPages or CONFIG.mirror.timeBudgetSeconds.'
+      });
+      return;
+    }
+
+    var written = writeMirror_(columns, result.leads);
+
+    logInfo_('Mirror synced in ' +
+      Math.round((new Date() - startedAt) / 1000) + 's.', {
+      leads: result.leads.length,
+      columns: columns.length,
+      cells: written
+    });
+  } catch (err) {
+    logError_('Mirror sync failed: ' + err.message, { stack: err.stack });
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Decides the mirror's columns.
+ *
+ * The CRM's schema is the default. An explicit CONFIG.mirror.columns list
+ * overrides it, for when the mirror should hold a chosen subset rather than
+ * every field the CRM happens to expose.
+ *
+ * @return {Array<{key: string, label: string}>}
+ */
+function resolveColumns_() {
+  if (CONFIG.mirror.columns && CONFIG.mirror.columns.length) {
+    return CONFIG.mirror.columns.map(function (entry) {
+      return typeof entry === 'string'
+        ? { key: entry, label: entry }
+        : entry;
+    });
+  }
+
+  var fields = fetchLeadFields_();
+
+  if (!fields.length) {
+    throw new Error('The CRM returned no field definitions, and ' +
+      'CONFIG.mirror.columns is empty — there are no columns to write.');
+  }
+
+  return fields;
+}
+
+/**
+ * Writes the header row and every lead into the mirror tab.
+ *
+ * @param {Array<{key: string, label: string}>} columns
+ * @param {Array<Object>} leads
+ * @return {number} cells written
+ */
+function writeMirror_(columns, leads) {
+  var sheet = mirrorSheet_();
+
+  var matrix = [columns.map(function (column) { return column.label; })];
+
+  leads.forEach(function (lead) {
+    matrix.push(columns.map(function (column) {
+      return flattenValue_(lead[column.key]);
+    }));
+  });
+
+  var rows = matrix.length;
+  var cols = columns.length;
+
+  growGrid_(sheet, rows, cols);
+  sheet.clearContents();
+
+  // One setValues for the whole block: a per-row write of a few thousand rows
+  // would not finish inside the execution limit.
+  sheet.getRange(1, 1, rows, cols).setValues(matrix);
+  sheet.setFrozenRows(1);
+
+  return rows * cols;
+}
+
+/**
+ * Renders an API value as something a spreadsheet cell can hold.
+ *
+ * Nested objects are the common case — a status or a source often arrives as
+ * {id, name} rather than a bare string, and writing "[object Object]" into
+ * the mirror would quietly lose the value.
+ *
+ * @param {*} value
+ * @return {string|number|boolean|Date}
+ */
+function flattenValue_(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  if (value instanceof Date) {
+    return value;
+  }
+
+  var type = typeof value;
+
+  if (type === 'number' || type === 'boolean') {
+    return value;
+  }
+
+  if (type === 'string') {
+    // Sheets treats a leading = + - @ as a formula; keep CRM text as text.
+    return /^[=+\-@]/.test(value) ? "'" + value : value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(flattenValue_).join(', ');
+  }
+
+  if (type === 'object') {
+    var label = value.name || value.title || value.label || value.value ||
+      value.displayName;
+
+    return label !== undefined ? String(label) : JSON.stringify(value);
+  }
+
+  return String(value);
+}
+
+/**
+ * Makes sure the grid is at least the requested size.
+ *
+ * setValues throws rather than expanding the sheet, and a new tab starts at
+ * 1000 rows — well under a few thousand leads.
+ *
+ * @param {Sheet} sheet
+ * @param {number} rows
+ * @param {number} cols
+ */
+function growGrid_(sheet, rows, cols) {
+  var maxRows = sheet.getMaxRows();
+  var maxCols = sheet.getMaxColumns();
+
+  if (maxRows < rows) {
+    sheet.insertRowsAfter(maxRows, rows - maxRows);
+  }
+
+  if (maxCols < cols) {
+    sheet.insertColumnsAfter(maxCols, cols - maxCols);
+  }
+}
+
+/**
+ * Resolves the mirror tab by gid, creating it if the gid is not found.
+ *
+ * gid survives a rename, which a tab name does not.
+ *
+ * @return {Sheet}
+ */
+function mirrorSheet_() {
+  var ss = SpreadsheetApp.openById(CONFIG.workbookId);
+
+  if (CONFIG.mirror.sheetGid !== null) {
+    var byGid = ss.getSheets().filter(function (sheet) {
+      return sheet.getSheetId() === CONFIG.mirror.sheetGid;
+    })[0];
+
+    if (byGid) {
+      return byGid;
+    }
+
+    logWarn_('No tab with gid ' + CONFIG.mirror.sheetGid +
+      ' — falling back to the tab named "' + CONFIG.mirror.tabName + '".');
+  }
+
+  return ss.getSheetByName(CONFIG.mirror.tabName) ||
+    ss.insertSheet(CONFIG.mirror.tabName);
+}
+
+
+// ======================================================================
+// Diff.gs
+// ======================================================================
+
+/**
+ * Compares the CRM against what is currently in the spreadsheet.
+ *
+ * Two uses. Day to day it answers "which leads came in that never made it
+ * into the sheet". Before the first mirror sync it is the safety check: it
+ * reports exactly what the sync is about to add and remove, while changing
+ * nothing.
+ */
+
+/**
+ * Reports leads present in the CRM but missing from the sheet, and rows in
+ * the sheet with no matching lead in the CRM.
+ *
+ * Read-only — it never edits the leads tab. Findings go to a separate report
+ * tab and to the log.
+ *
+ * @return {{missing: Array<Object>, stale: Array<string>, matched: number}}
+ */
+function reportMissingLeads() {
+  var result = fetchAllLeads_({
+    deadline: new Date(Date.now() + CONFIG.mirror.timeBudgetSeconds * 1000)
+  });
+
+  if (!result.complete) {
+    logWarn_('The CRM read was incomplete — treat this report as partial.', {
+      leadsRead: result.leads.length
+    });
+  }
+
+  var leads = result.leads;
+
+  if (!leads.length) {
+    console.log('The CRM returned no leads.');
+    return { missing: [], stale: [], matched: 0 };
+  }
+
+  var sheetKeys = readSheetKeys_(leads);
+
+  if (!sheetKeys) {
+    // Nothing in the sheet lines up with any CRM identifier. Reporting every
+    // lead as "missing" would be noise, so say what actually went wrong.
+    logWarn_('No column in the sheet matches a CRM identifier — the sheet ' +
+      'may be empty, or its id column may hold something else entirely.', {
+      hint: 'Set CONFIG.mirror.keyField / keyHeader if the match is not obvious.'
+    });
+    return { missing: leads, stale: [], matched: 0 };
+  }
+
+  var missing = leads.filter(function (lead) {
+    return !sheetKeys.values[String(lead[sheetKeys.crmField])];
+  });
+
+  var crmKeys = {};
+  leads.forEach(function (lead) {
+    crmKeys[String(lead[sheetKeys.crmField])] = true;
+  });
+
+  var stale = Object.keys(sheetKeys.values).filter(function (key) {
+    return !crmKeys[key];
+  });
+
+  writeDiffReport_(missing, stale, sheetKeys);
+
+  var summary = 'CRM has ' + leads.length + ' lead(s). ' +
+    missing.length + ' missing from the sheet, ' +
+    stale.length + ' row(s) in the sheet with no CRM match.';
+
+  console.log(summary + '\nMatched on the sheet column "' +
+    sheetKeys.header + '" against the CRM field "' + sheetKeys.crmField + '".');
+
+  logInfo_(summary, {
+    matchedOn: sheetKeys.header + ' -> ' + sheetKeys.crmField,
+    sampleMissing: missing.slice(0, 10).map(function (lead) {
+      return String(lead[sheetKeys.crmField]);
+    })
+  });
+
+  return {
+    missing: missing,
+    stale: stale,
+    matched: Object.keys(sheetKeys.values).length - stale.length
+  };
+}
+
+/**
+ * Works out which sheet column holds the lead identifier.
+ *
+ * The sheet is an export whose column names are not known here, so rather
+ * than guessing a header, every column is scored by how many of its values
+ * actually appear as identifiers in the CRM. The best-scoring column wins.
+ * That survives a renamed header and a column added in the middle.
+ *
+ * @param {Array<Object>} leads
+ * @return {?{column: number, header: string, crmField: string,
+ *            values: Object<string, boolean>}}
+ */
+function readSheetKeys_(leads) {
+  var sheet = mirrorSheet_();
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+
+  if (lastRow < 2 || lastCol < 1) {
+    return null;
+  }
+
+  var values = sheet.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+  var headers = values[0];
+
+  // Candidate identifier fields, in order of preference.
+  var crmFields = [CONFIG.leadFields.id, CONFIG.leadFields.displayId,
+    'id', 'leadId', 'leadNumber', 'number'].filter(unique_);
+
+  var best = null;
+
+  crmFields.forEach(function (field) {
+    var crmValues = {};
+    var populated = 0;
+
+    leads.forEach(function (lead) {
+      var value = lead[field];
+      if (value !== undefined && value !== null && value !== '') {
+        crmValues[String(value).trim()] = true;
+        populated++;
+      }
+    });
+
+    if (!populated) {
+      return;
+    }
+
+    for (var col = 0; col < lastCol; col++) {
+      var seen = {};
+      var hits = 0;
+      var filled = 0;
+
+      for (var row = 1; row < values.length; row++) {
+        var cell = String(values[row][col] || '').trim();
+
+        if (!cell) {
+          continue;
+        }
+
+        filled++;
+        seen[cell] = true;
+
+        if (crmValues[cell]) {
+          hits++;
+        }
+      }
+
+      // Score by hit *rate*, not hit count. A column of names scores near
+      // zero however long the sheet is, while a genuine id column scores high
+      // even on a short sheet or one carrying rows the CRM no longer has —
+      // which a fixed minimum-hits threshold gets wrong in both directions.
+      var rate = filled ? hits / filled : 0;
+
+      if (hits && (!best || rate > best.rate ||
+          (rate === best.rate && hits > best.hits))) {
+        best = {
+          hits: hits,
+          rate: rate,
+          column: col,
+          header: headers[col] || ('column ' + (col + 1)),
+          crmField: field,
+          values: seen
+        };
+      }
+    }
+  });
+
+  // Below this the winning column is coincidence, not an identifier.
+  if (!best || best.rate < 0.3) {
+    return null;
+  }
+
+  return best;
+}
+
+/**
+ * Writes the findings to their own tab, replacing the previous report.
+ *
+ * @param {Array<Object>} missing
+ * @param {Array<string>} stale
+ * @param {Object} keys
+ */
+function writeDiffReport_(missing, stale, keys) {
+  var ss = SpreadsheetApp.openById(CONFIG.workbookId);
+  var name = 'דוח פערים';
+  var sheet = ss.getSheetByName(name) || ss.insertSheet(name);
+
+  sheet.clear();
+
+  // Show the fields that identify a lead to a human, not the whole record.
+  var f = CONFIG.leadFields;
+  var columns = [f.displayId, f.clientName, f.statusName, f.statusDate,
+    f.sourceName].filter(unique_);
+
+  var rows = [['סוג', 'מזהה'].concat(columns)];
+
+  missing.forEach(function (lead) {
+    rows.push(['חסר בגיליון', String(lead[keys.crmField])].concat(
+      columns.map(function (column) { return flattenValue_(lead[column]); })));
+  });
+
+  stale.forEach(function (key) {
+    rows.push(['בגיליון, לא ב-CRM', key].concat(
+      columns.map(function () { return ''; })));
+  });
+
+  if (rows.length === 1) {
+    rows.push(['אין פערים', '', '', '', '', '', '']. slice(0, rows[0].length));
+  }
+
+  growGrid_(sheet, rows.length, rows[0].length);
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.setFrozenRows(1);
+}
+
+
+// ======================================================================
 // Triggers.gs
 // ======================================================================
 
 /**
- * Trigger management. Run installHourlyTrigger() once, from the Apps Script
- * editor, to put the automation on its schedule.
+ * Trigger management. Run the installers once, from the Apps Script editor,
+ * to put the automations on their schedule.
+ *
+ * There are two independent automations sharing this project:
+ *   hourlyMirror  — copies the CRM into the spreadsheet
+ *   hourlyUpdate  — emails referring sources when a lead's status changes
+ *
+ * They can be enabled separately; neither depends on the other.
  */
 
-var TRIGGER_HANDLER = 'hourlyUpdate';
+var HANDLERS = { mirror: 'hourlyMirror', notifier: 'hourlyUpdate' };
+
+/** Installs the hourly CRM-to-sheet mirror. */
+function installMirrorTrigger() {
+  installHourly_(HANDLERS.mirror);
+}
+
+/** Installs the hourly status-change notifier. */
+function installNotifierTrigger() {
+  installHourly_(HANDLERS.notifier);
+}
 
 /**
- * Installs the hourly time-driven trigger, replacing any earlier copy.
+ * Creates an hourly trigger for one handler, replacing any earlier copy.
  *
  * Apps Script has no weekday filter for hourly triggers — the trigger fires
- * every hour, every day, and hourlyUpdate() drops the ticks that fall outside
+ * every hour, every day, and the handler drops the ticks that fall outside
  * CONFIG.activeDays and CONFIG.activeHours.
+ *
+ * @param {string} handler
  */
-function installHourlyTrigger() {
-  removeTriggers();
+function installHourly_(handler) {
+  removeTrigger_(handler);
 
-  ScriptApp.newTrigger(TRIGGER_HANDLER)
-    .timeBased()
-    .everyHours(1)
-    .create();
+  ScriptApp.newTrigger(handler).timeBased().everyHours(1).create();
 
-  var days = CONFIG.activeDays.map(function (d) {
-    return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d];
+  var days = CONFIG.activeDays.map(function (day) {
+    return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][day];
   }).join(', ');
 
-  var message = 'Hourly trigger installed. Active days: ' + days +
+  var message = handler + ' installed hourly. Active days: ' + days +
     ' (' + CONFIG.timezone + ').';
 
   console.log(message);
-  logInfo_(message, {
-    activeHours: CONFIG.activeHours === null ? 'all' : CONFIG.activeHours
-  });
+  logInfo_(message);
 }
 
-/** Removes every trigger this script owns. Use it to pause the automation. */
+/** Removes every trigger this project owns. Stops both automations. */
 function removeTriggers() {
-  var removed = 0;
+  var removed = ScriptApp.getProjectTriggers().length;
 
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
-    if (trigger.getHandlerFunction() === TRIGGER_HANDLER) {
-      ScriptApp.deleteTrigger(trigger);
-      removed++;
-    }
+    ScriptApp.deleteTrigger(trigger);
   });
 
-  if (removed) {
-    console.log('Removed ' + removed + ' existing trigger(s).');
-  }
+  console.log('Removed ' + removed + ' trigger(s).');
 }
 
-/** Lists the installed triggers — a quick check that the schedule is live. */
+/**
+ * @param {string} handler
+ */
+function removeTrigger_(handler) {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === handler) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+}
+
+/** Lists the installed triggers — a quick check that a schedule is live. */
 function listTriggers() {
   var triggers = ScriptApp.getProjectTriggers();
 
   if (!triggers.length) {
-    console.log('No triggers installed. Run installHourlyTrigger().');
+    console.log('No triggers installed.');
     return;
   }
 
   triggers.forEach(function (trigger) {
-    console.log(trigger.getHandlerFunction() + ' — ' +
-      trigger.getEventType() + ' / ' + trigger.getTriggerSource());
+    console.log(trigger.getHandlerFunction() + ' — ' + trigger.getEventType());
   });
 }
 
 /**
- * Clears the run watermark so the next run re-scans the last
+ * Clears the notifier's watermark so its next run re-scans the last
  * CONFIG.firstRunLookbackHours instead of continuing from where it stopped.
  */
 function resetWatermark() {
@@ -1031,8 +1657,10 @@ function resetWatermark() {
 }
 
 /**
- * One-time check that everything the automation depends on is in place.
- * Run this before installing the trigger.
+ * One-time check that everything the automations depend on is in place.
+ * Run this before installing any trigger.
+ *
+ * @return {Array<string>} problems found
  */
 function checkSetup() {
   var problems = [];
@@ -1043,9 +1671,24 @@ function checkSetup() {
     }
   });
 
+  try {
+    getAccessToken_();
+    console.log('✓ Surense authentication succeeded.');
+  } catch (err) {
+    problems.push('Surense authentication failed: ' + err.message);
+  }
+
+  try {
+    var sheet = mirrorSheet_();
+    console.log('✓ Mirror tab resolved: "' + sheet.getName() + '".');
+  } catch (err) {
+    problems.push('Mirror tab unreachable: ' + err.message);
+  }
+
+  // The notifier needs more than the mirror does; report but do not fail on it.
   if (!CONFIG.operatorEmail) {
-    problems.push('CONFIG.operatorEmail is empty — flood-brake alerts have ' +
-      'nowhere to go.');
+    problems.push('Notifier: CONFIG.operatorEmail is empty — flood-brake ' +
+      'alerts have nowhere to go.');
   }
 
   try {
@@ -1055,26 +1698,19 @@ function checkSetup() {
     });
 
     if (!withEmail.length) {
-      problems.push('The mapping tab has no rows with an email address — ' +
-        'nothing can be sent yet.');
+      problems.push('Notifier: the mapping tab has no email addresses yet — ' +
+        'nothing can be sent. (The mirror does not need this.)');
     } else {
-      console.log(withEmail.length + ' source(s) have an email address.');
+      console.log('✓ ' + withEmail.length + ' source(s) have an email address.');
     }
   } catch (err) {
-    problems.push('Mapping tab unreadable: ' + err.message);
-  }
-
-  try {
-    getAccessToken_();
-    console.log('Surense authentication succeeded.');
-  } catch (err) {
-    problems.push('Surense authentication failed: ' + err.message);
+    problems.push('Notifier: mapping tab unreadable: ' + err.message);
   }
 
   if (problems.length) {
     console.warn('Setup is incomplete:\n - ' + problems.join('\n - '));
   } else {
-    console.log('Setup looks complete. Run dryRun() next.');
+    console.log('Setup looks complete. Run previewApi() next.');
   }
 
   return problems;
