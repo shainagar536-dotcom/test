@@ -1,6 +1,7 @@
 /* Apps Script stubs so the real logic can be exercised locally. */
 const fs = require('fs');
 const vm = require('vm');
+const crypto = require('crypto');
 
 function fmt(date, tz, pattern) {
   const p = new Intl.DateTimeFormat('en-GB', {
@@ -32,7 +33,7 @@ class FakeSheet {
   clear() { this.data = []; }
   getLastRow() { return this.data.length; }
   getLastColumn() { return this.data.reduce((m, r) => Math.max(m, r.length), 0); }
-  setFrozenRows() {} hideSheet() {}
+  setFrozenRows() {} hideSheet() {} hideColumns(c) { this.hidden = c; }
   appendRow(row) { this.data.push(row.slice()); }
   deleteRows(start, n) { this.data.splice(start - 1, n); }
   getRange(r, c, nr = 1, nc = 1) {
@@ -71,7 +72,14 @@ let fetchImpl = () => { throw new Error('no fetch stub'); };
 
 const sandbox = {
   console: { log: () => {}, warn: () => {}, error: () => {} },
-  Utilities: { formatDate: fmt },
+  Utilities: {
+    formatDate: fmt,
+    DigestAlgorithm: { MD5: 'MD5' },
+    Charset: { UTF_8: 'utf8' },
+    computeDigest: (_a, text) =>
+      Array.from(crypto.createHash('md5').update(text, 'utf8').digest())
+        .map(b => (b > 127 ? b - 256 : b))
+  },
   PropertiesService: {
     getScriptProperties: () => ({
       getProperty: k => props[k] ?? null,
@@ -122,6 +130,19 @@ check('Sunday runs',      run('isWithinSchedule_(D("2026-08-16T09:00:00+03:00"))
 check('Friday runs',      run('isWithinSchedule_(D("2026-08-21T09:00:00+03:00"))'), true);
 // 21:30Z Fri = 00:30 Sat in Jerusalem: the timezone, not UTC, decides the day.
 check('tz decides the day', run('isWithinSchedule_(D("2026-08-14T21:30:00Z"))'), false);
+
+// the configured working window is 08:00-20:00 local, inclusive at both ends
+check('07:00 is before the window',
+  run('isWithinSchedule_(D("2026-08-16T07:00:00+03:00"))'), false);
+check('08:00 opens the window',
+  run('isWithinSchedule_(D("2026-08-16T08:00:00+03:00"))'), true);
+check('20:00 is still inside',
+  run('isWithinSchedule_(D("2026-08-16T20:30:00+03:00"))'), true);
+check('21:00 is past the window',
+  run('isWithinSchedule_(D("2026-08-16T21:00:00+03:00"))'), false);
+// the window is read in CONFIG.timezone, not UTC: 06:00Z is 09:00 local
+check('window is evaluated in the local timezone',
+  run('isWithinSchedule_(D("2026-08-16T06:00:00Z"))'), true);
 
 // ------------------------------------------------------------- status table
 check('mapped status returns wording',
@@ -272,35 +293,83 @@ const crmStub = (fields, rows) => (url, options) => {
 };
 
 const FIELDS = [
-  { key: 'id', label: 'מזהה' },
   { key: 'name', label: 'שם' },
+  { key: 'id', label: 'מזהה' },            // deliberately not first
   { key: 'status', label: 'סטטוס' }
 ];
-const crmLead = id => ({
+const crmLead = (id, status) => ({
   id: String(id), name: 'לקוח ' + id,
-  status: { id: 's' + id, name: 'לא ענה' }   // nested, as CRMs usually send
+  status: { id: 's' + id, name: status || 'לא ענה' }   // nested, as CRMs send
 });
 
 const mirror = sheets['לידים'];
+// column indexes in the written sheet: id, name, status, stamp, type, hash
+const COL = { id: 0, name: 1, status: 2, stamp: 3, type: 4, hash: 5 };
+const rowById = id => mirror.data.slice(1).find(r => String(r[COL.id]) === id);
+
+// --- first run: a baseline, not "3000 new leads" ---
 fetchImpl = crmStub(FIELDS, [crmLead(1), crmLead(2)]);
-run('syncLeads()');
-check('headers come from the CRM schema', mirror.data[0], ['מזהה', 'שם', 'סטטוס']);
-check('nested object flattened to its name', mirror.data[1][2], 'לא ענה');
-check('every lead written', mirror.data.length, 3);
+let stats = run('syncLeads()');
+check('id column forced first', mirror.data[0][COL.id], 'מזהה');
+check('meta columns appended',
+  mirror.data[0].slice(COL.stamp), ['עודכן בגיליון', 'סוג שינוי', '_hash']);
+check('nested object flattened to its name', rowById('1')[COL.status], 'לא ענה');
+check('first run reports a baseline', stats.baseline, true);
+check('baseline does not claim leads are new', stats.added, 0);
+check('rows marked as baseline', rowById('1')[COL.type], 'בסיס');
+check('hash column hidden', mirror.hidden, 6);
 
-// a full replace, not an append: a lead gone from the CRM leaves the sheet
-fetchImpl = crmStub(FIELDS, [crmLead(2)]);
-run('syncLeads()');
-check('sync replaces rather than appends', mirror.data.length, 2);
-check('remaining row is the surviving lead', mirror.data[1][0], '2');
+// age the stamps so carry-forward is observable
+mirror.data.slice(1).forEach(r => { r[COL.stamp] = '2020-01-01 00:00:00'; });
 
-// explicit column list overrides schema discovery
-run(`CONFIG.mirror.columns = [{key:'id',label:'ID'},{key:'name',label:'Name'}]`);
+// --- second run, nothing changed ---
+stats = run('syncLeads()');
+check('unchanged leads counted', stats.unchanged, 2);
+check('no phantom updates', stats.updated, 0);
+check('unchanged row keeps its original stamp',
+  rowById('1')[COL.stamp], '2020-01-01 00:00:00');
+
+// --- one lead changes, one is added ---
+fetchImpl = crmStub(FIELDS,
+  [crmLead(1), crmLead(2, 'לא עונה 3'), crmLead(3)]);
+stats = run('syncLeads()');
+check('changed lead detected', stats.updated, 1);
+check('new lead detected', stats.added, 1);
+check('changed row marked', rowById('2')[COL.type], 'עודכן');
+check('changed row restamped', rowById('2')[COL.stamp] !== '2020-01-01 00:00:00', true);
+check('untouched row keeps its old stamp',
+  rowById('1')[COL.stamp], '2020-01-01 00:00:00');
+check('untouched row keeps its old label', rowById('1')[COL.type], 'בסיס');
+check('new row marked', rowById('3')[COL.type], 'חדש');
+check('changed value actually written', rowById('2')[COL.status], 'לא עונה 3');
+
+// --- a lead disappears from the CRM ---
+fetchImpl = crmStub(FIELDS, [crmLead(1), crmLead(2, 'לא עונה 3')]);
+stats = run('syncLeads()');
+check('missing lead counted once', stats.missing, 1);
+check('its row is kept, not deleted', !!rowById('3'), true);
+check('and flagged', rowById('3')[COL.type], 'לא נמצא ב-CRM');
+check('its CRM values are preserved', rowById('3')[COL.name], 'לקוח 3');
+
+const flaggedAt = rowById('3')[COL.stamp];
+stats = run('syncLeads()');
+check('an already-flagged row is not re-counted', stats.missing, 0);
+check('and not restamped', rowById('3')[COL.stamp], flaggedAt);
+
+// removeMissing drops it instead
+run('CONFIG.mirror.removeMissing = true');
 run('syncLeads()');
-check('explicit columns win', mirror.data[0], ['ID', 'Name']);
+check('removeMissing deletes the row', !!rowById('3'), false);
+run('CONFIG.mirror.removeMissing = false');
+
+// --- explicit column list still honoured, id still forced first ---
+run(`CONFIG.mirror.columns = [{key:'name',label:'Name'}]`);
+run('syncLeads()');
+check('explicit columns keep id first', mirror.data[0][0], 'id');
+check('explicit columns otherwise respected', mirror.data[0][1], 'Name');
 run('CONFIG.mirror.columns = []');
 
-// the grid is expanded past the default 1000 rows before writing
+// --- scale: the grid is expanded past the default 1000 rows ---
 const many = Array.from({ length: 1200 }, (_, i) => crmLead(i + 1));
 fetchImpl = crmStub(FIELDS, many);
 run('CONFIG.surense.maxPages = 40');
@@ -308,16 +377,15 @@ run('syncLeads()');
 check('grid grown for a large pull', mirror.getMaxRows() >= 1201, true);
 check('all 1200 leads written', mirror.data.length, 1201);
 
-// a truncated read must not be written as if it were the whole CRM
+// --- the two no-write guards ---
 const before = JSON.stringify(mirror.data);
 run('CONFIG.surense.maxPages = 1');
-run('syncLeads()');
+check('partial read returns nothing', run('syncLeads()'), null);
 check('partial read leaves the mirror untouched', JSON.stringify(mirror.data), before);
 run('CONFIG.surense.maxPages = 40');
 
-// an empty response is treated as suspect, not as "delete everything"
 fetchImpl = crmStub(FIELDS, []);
-run('syncLeads()');
+check('empty CRM returns nothing', run('syncLeads()'), null);
 check('empty CRM leaves the mirror untouched', JSON.stringify(mirror.data), before);
 
 // ------------------------------------------------------------- flattenValue_

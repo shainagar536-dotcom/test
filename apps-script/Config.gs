@@ -79,13 +79,19 @@ var CONFIG = {
 
     // Apps Script kills an execution at 6 minutes. Paging stops at this many
     // seconds so the run ends on its own terms and reports why.
-    timeBudgetSeconds: 300
+    timeBudgetSeconds: 300,
+
+    // What to do with a row whose lead the CRM no longer returns. Marking it
+    // is the default: deleting a row cannot be undone, and a lead vanishing
+    // is more often a changed filter or permission than a real deletion.
+    removeMissing: false
   },
 
   // -------------------------------------------------------------- schedule
   timezone: 'Asia/Jerusalem',
   activeDays: [0, 1, 2, 3, 4, 5],   // 0 = Sunday ... 6 = Saturday
-  activeHours: null,                // null = every hour of an active day
+  // 08:00 through 20:00 local. null would mean every hour of an active day.
+  activeHours: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
 
   // How far back the very first run looks, before a watermark exists.
   firstRunLookbackHours: 1,

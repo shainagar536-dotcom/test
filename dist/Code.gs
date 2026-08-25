@@ -100,13 +100,19 @@ var CONFIG = {
 
     // Apps Script kills an execution at 6 minutes. Paging stops at this many
     // seconds so the run ends on its own terms and reports why.
-    timeBudgetSeconds: 300
+    timeBudgetSeconds: 300,
+
+    // What to do with a row whose lead the CRM no longer returns. Marking it
+    // is the default: deleting a row cannot be undone, and a lead vanishing
+    // is more often a changed filter or permission than a real deletion.
+    removeMissing: false
   },
 
   // -------------------------------------------------------------- schedule
   timezone: 'Asia/Jerusalem',
   activeDays: [0, 1, 2, 3, 4, 5],   // 0 = Sunday ... 6 = Saturday
-  activeHours: null,                // null = every hour of an active day
+  // 08:00 through 20:00 local. null would mean every hour of an active day.
+  activeHours: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
 
   // How far back the very first run looks, before a watermark exists.
   firstRunLookbackHours: 1,
@@ -1055,17 +1061,34 @@ function localDayIndex_(date) {
 // ======================================================================
 
 /**
- * The mirror: a full copy of the CRM's leads in a spreadsheet tab.
+ * The mirror: keeps a spreadsheet tab in step with the CRM's leads.
  *
- * Every run replaces the tab's contents outright rather than patching rows.
- * A full replace is self-healing — a lead deleted in the CRM disappears here,
- * an edited field is simply correct again, and no drift can accumulate. The
- * cost is re-reading everything each hour, which at a few thousand leads is
- * well inside what Apps Script allows.
+ * Rows are matched by lead id and updated only when their values actually
+ * changed. A row whose lead is unchanged keeps the timestamp it already had,
+ * which is what makes the "changed at" column meaningful — rewriting every
+ * row each hour would stamp them all with the time of the last run and say
+ * nothing about when anything actually changed.
+ *
+ * The CRM is only ever read. Nothing here writes back to Surense.
  *
  * Columns come from the CRM's own field schema, so a field added in Surense
  * appears in the mirror without a code change.
  */
+
+/** Columns the mirror maintains itself, appended after the CRM's own. */
+var META = {
+  timestamp: 'עודכן בגיליון',
+  changeType: 'סוג שינוי',
+  hash: '_hash'
+};
+
+/** Values written into the change-type column. */
+var CHANGE = {
+  baseline: 'בסיס',
+  added: 'חדש',
+  updated: 'עודכן',
+  missing: 'לא נמצא ב-CRM'
+};
 
 /**
  * Reports what the API actually returns, without writing anything.
@@ -1073,34 +1096,34 @@ function localDayIndex_(date) {
  * Run this first. The response shapes could not be checked while the code was
  * written — the environment it was written in has no route to the API — so
  * this is what confirms the field names and the response envelope before the
- * first real sync touches the sheet.
+ * first sync touches the sheet.
  */
 function previewApi() {
   var lines = [];
 
   try {
     getAccessToken_();
-    lines.push('✓ Authentication succeeded.');
+    lines.push('OK  Authentication succeeded.');
   } catch (err) {
-    console.log('✗ Authentication failed: ' + err.message);
+    console.log('FAIL  Authentication failed: ' + err.message);
     return;
   }
 
   try {
     var fields = fetchLeadFields_();
-    lines.push('✓ /leads/fields returned ' + fields.length + ' field(s).');
-    lines.push('  ' + fields.slice(0, 40).map(function (f) {
-      return f.key + (f.label !== f.key ? ' (' + f.label + ')' : '');
+    lines.push('OK  /leads/fields returned ' + fields.length + ' field(s).');
+    lines.push('  ' + fields.slice(0, 40).map(function (field) {
+      return field.key + (field.label !== field.key ? ' (' + field.label + ')' : '');
     }).join(', '));
   } catch (err) {
-    lines.push('✗ /leads/fields failed: ' + err.message);
+    lines.push('FAIL  /leads/fields failed: ' + err.message);
   }
 
   try {
     var parsed = surenseRequest_('post', '/leads/search',
       { startRow: 0, endRow: 1, filters: [] });
 
-    lines.push('✓ /leads/search responded.');
+    lines.push('OK  /leads/search responded.');
     lines.push('  envelope keys: ' + Object.keys(parsed).join(', '));
 
     var rows = extractRows_(parsed);
@@ -1111,7 +1134,7 @@ function previewApi() {
       lines.push('  first lead: ' + JSON.stringify(rows[0]).slice(0, 1500));
     }
   } catch (err) {
-    lines.push('✗ /leads/search failed: ' + err.message);
+    lines.push('FAIL  /leads/search failed: ' + err.message);
   }
 
   console.log(lines.join('\n'));
@@ -1123,7 +1146,8 @@ function hourlyMirror() {
   var now = new Date();
 
   if (!isWithinSchedule_(now)) {
-    console.log('Outside the configured window — skipping.');
+    console.log('Outside the configured window (' +
+      Utilities.formatDate(now, CONFIG.timezone, 'EEE HH:mm') + ') — skipping.');
     return;
   }
 
@@ -1131,48 +1155,61 @@ function hourlyMirror() {
 }
 
 /**
- * Replaces the mirror tab with the current contents of the CRM.
+ * Brings the mirror tab in step with the CRM.
+ *
+ * @return {?{added: number, updated: number, unchanged: number,
+ *            missing: number, baseline: boolean}}
  */
 function syncLeads() {
   var lock = LockService.getScriptLock();
 
   if (!lock.tryLock(30 * 1000)) {
     logWarn_('A mirror sync is already running — skipping.');
-    return;
+    return null;
   }
 
   var startedAt = new Date();
 
   try {
-    var deadline = new Date(
-      startedAt.getTime() + CONFIG.mirror.timeBudgetSeconds * 1000);
-
     var columns = resolveColumns_();
-    var result = fetchAllLeads_({ deadline: deadline });
+    var result = fetchAllLeads_({
+      deadline: new Date(
+        startedAt.getTime() + CONFIG.mirror.timeBudgetSeconds * 1000)
+    });
 
     if (!result.leads.length) {
       logWarn_('The CRM returned no leads — the mirror was left untouched.');
-      return;
+      return null;
     }
 
-    // A truncated read must not be written as if it were the whole CRM:
-    // replacing the tab with a partial pull would look like mass deletion.
+    // A truncated read must not be acted on as if it were the whole CRM:
+    // every lead not read would be marked as gone from the CRM.
     if (!result.complete) {
       logError_('Read incomplete (' + result.leads.length + ' leads) — the ' +
-        'mirror was left untouched to avoid writing a partial copy.', {
+        'mirror was left untouched to avoid acting on a partial copy.', {
         hint: 'Raise CONFIG.surense.maxPages or CONFIG.mirror.timeBudgetSeconds.'
       });
-      return;
+      return null;
     }
 
-    var written = writeMirror_(columns, result.leads);
+    var existing = readExisting_();
+    var plan = buildRows_(columns, result.leads, existing);
 
-    logInfo_('Mirror synced in ' +
-      Math.round((new Date() - startedAt) / 1000) + 's.', {
-      leads: result.leads.length,
-      columns: columns.length,
-      cells: written
+    writeRows_(columns, plan.rows);
+
+    var stats = plan.stats;
+    stats.baseline = existing.baseline;
+
+    logInfo_((existing.baseline ? 'Baseline written' : 'Mirror synced') +
+      ' in ' + Math.round((new Date() - startedAt) / 1000) + 's.', {
+      leadsInCrm: result.leads.length,
+      added: stats.added,
+      updated: stats.updated,
+      unchanged: stats.unchanged,
+      missingFromCrm: stats.missing
     });
+
+    return stats;
   } catch (err) {
     logError_('Mirror sync failed: ' + err.message, { stack: err.stack });
     throw err;
@@ -1182,63 +1219,224 @@ function syncLeads() {
 }
 
 /**
- * Decides the mirror's columns.
+ * Decides the mirror's columns, with the lead id always first.
  *
- * The CRM's schema is the default. An explicit CONFIG.mirror.columns list
- * overrides it, for when the mirror should hold a chosen subset rather than
- * every field the CRM happens to expose.
+ * Fixing the id in column A is what lets a later run find a row again
+ * without having to guess which header holds the identifier.
  *
  * @return {Array<{key: string, label: string}>}
  */
 function resolveColumns_() {
+  var columns;
+
   if (CONFIG.mirror.columns && CONFIG.mirror.columns.length) {
-    return CONFIG.mirror.columns.map(function (entry) {
-      return typeof entry === 'string'
-        ? { key: entry, label: entry }
-        : entry;
+    columns = CONFIG.mirror.columns.map(function (entry) {
+      return typeof entry === 'string' ? { key: entry, label: entry } : entry;
     });
+  } else {
+    columns = fetchLeadFields_();
   }
 
-  var fields = fetchLeadFields_();
-
-  if (!fields.length) {
+  if (!columns.length) {
     throw new Error('The CRM returned no field definitions, and ' +
       'CONFIG.mirror.columns is empty — there are no columns to write.');
   }
 
-  return fields;
+  var idKey = CONFIG.leadFields.id;
+
+  var idColumn = columns.filter(function (column) {
+    return column.key === idKey;
+  })[0] || { key: idKey, label: idKey };
+
+  var rest = columns.filter(function (column) {
+    return column.key !== idKey;
+  });
+
+  return [idColumn].concat(rest);
 }
 
 /**
- * Writes the header row and every lead into the mirror tab.
+ * Reads what the mirror wrote last time, keyed by lead id.
+ *
+ * A tab without the mirror's own meta columns has never been synced — it may
+ * hold an old export whose layout is unknown. That is reported as a baseline
+ * so the first run stamps everything once rather than announcing thousands of
+ * leads as newly added.
+ *
+ * @return {{baseline: boolean, byId: Object, order: Array<string>}}
+ */
+function readExisting_() {
+  var sheet = mirrorSheet_();
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  var empty = { baseline: true, byId: {}, order: [] };
+
+  if (lastRow < 2 || lastCol < 1) {
+    return empty;
+  }
+
+  var values = sheet.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+  var headers = values[0];
+
+  var iTime = headers.indexOf(META.timestamp);
+  var iType = headers.indexOf(META.changeType);
+  var iHash = headers.indexOf(META.hash);
+
+  if (iTime === -1 || iType === -1 || iHash === -1) {
+    return empty;
+  }
+
+  var byId = {};
+  var order = [];
+
+  for (var row = 1; row < values.length; row++) {
+    var id = String(values[row][0] || '').trim();
+
+    if (!id) {
+      continue;
+    }
+
+    byId[id] = {
+      timestamp: values[row][iTime],
+      type: values[row][iType],
+      hash: values[row][iHash],
+      raw: values[row]
+    };
+
+    order.push(id);
+  }
+
+  return { baseline: false, byId: byId, order: order };
+}
+
+/**
+ * Builds the rows to write, deciding for each lead whether it is new,
+ * changed, or untouched since the previous run.
  *
  * @param {Array<{key: string, label: string}>} columns
  * @param {Array<Object>} leads
- * @return {number} cells written
+ * @param {Object} existing
+ * @return {{rows: Array<Array>, stats: Object}}
  */
-function writeMirror_(columns, leads) {
-  var sheet = mirrorSheet_();
+function buildRows_(columns, leads, existing) {
+  var now = Utilities.formatDate(
+    new Date(), CONFIG.timezone, 'yyyy-MM-dd HH:mm:ss');
 
-  var matrix = [columns.map(function (column) { return column.label; })];
+  var stats = { added: 0, updated: 0, unchanged: 0, missing: 0 };
+  var rows = [];
+  var seen = {};
 
   leads.forEach(function (lead) {
-    matrix.push(columns.map(function (column) {
+    var values = columns.map(function (column) {
       return flattenValue_(lead[column.key]);
-    }));
+    });
+
+    var id = String(values[0]);
+    var hash = hashValues_(values);
+    var previous = existing.byId[id];
+    var timestamp;
+    var changeType;
+
+    if (existing.baseline) {
+      timestamp = now;
+      changeType = CHANGE.baseline;
+    } else if (!previous) {
+      timestamp = now;
+      changeType = CHANGE.added;
+      stats.added++;
+    } else if (String(previous.hash) !== hash) {
+      timestamp = now;
+      changeType = CHANGE.updated;
+      stats.updated++;
+    } else {
+      // Untouched: keep the stamp from whenever this row last really changed.
+      timestamp = previous.timestamp;
+      changeType = previous.type;
+      stats.unchanged++;
+    }
+
+    seen[id] = true;
+    rows.push(values.concat([timestamp, changeType, hash]));
   });
 
-  var rows = matrix.length;
-  var cols = columns.length;
+  // Leads the CRM no longer returns. Marked rather than deleted — removing a
+  // row is not recoverable, and a lead vanishing is more often a filter or a
+  // permission change than a real deletion. Set CONFIG.mirror.removeMissing
+  // to drop them instead.
+  if (!existing.baseline && !CONFIG.mirror.removeMissing) {
+    existing.order.forEach(function (id) {
+      if (seen[id]) {
+        return;
+      }
 
-  growGrid_(sheet, rows, cols);
+      var previous = existing.byId[id];
+      var row = previous.raw.slice();
+      var alreadyFlagged = previous.type === CHANGE.missing;
+
+      while (row.length < columns.length + 3) {
+        row.push('');
+      }
+
+      row[columns.length] = alreadyFlagged ? previous.timestamp : now;
+      row[columns.length + 1] = CHANGE.missing;
+      row[columns.length + 2] = previous.hash;
+
+      rows.push(row);
+
+      if (!alreadyFlagged) {
+        stats.missing++;
+      }
+    });
+  }
+
+  return { rows: rows, stats: stats };
+}
+
+/**
+ * Writes the header row and every data row in one call.
+ *
+ * The whole block goes out at once: a per-row write of several thousand rows
+ * would not finish inside the execution limit.
+ *
+ * @param {Array<{key: string, label: string}>} columns
+ * @param {Array<Array>} rows
+ */
+function writeRows_(columns, rows) {
+  var sheet = mirrorSheet_();
+
+  var headers = columns.map(function (column) {
+    return column.label;
+  }).concat([META.timestamp, META.changeType, META.hash]);
+
+  var matrix = [headers].concat(rows);
+  var width = headers.length;
+
+  growGrid_(sheet, matrix.length, width);
   sheet.clearContents();
-
-  // One setValues for the whole block: a per-row write of a few thousand rows
-  // would not finish inside the execution limit.
-  sheet.getRange(1, 1, rows, cols).setValues(matrix);
+  sheet.getRange(1, 1, matrix.length, width).setValues(matrix);
   sheet.setFrozenRows(1);
 
-  return rows * cols;
+  // The hash is bookkeeping, not data anyone should have to look at.
+  sheet.hideColumns(width);
+}
+
+/**
+ * A short, stable fingerprint of a row's CRM values.
+ *
+ * @param {Array} values
+ * @return {string}
+ */
+function hashValues_(values) {
+  var text = values.map(function (value) {
+    return value === null || value === undefined ? '' : String(value);
+  }).join('');
+
+  return Utilities.computeDigest(
+    Utilities.DigestAlgorithm.MD5, text, Utilities.Charset.UTF_8)
+    .map(function (byte) {
+      return ((byte & 0xff) + 0x100).toString(16).slice(1);
+    })
+    .join('');
 }
 
 /**
@@ -1249,7 +1447,7 @@ function writeMirror_(columns, leads) {
  * the mirror would quietly lose the value.
  *
  * @param {*} value
- * @return {string|number|boolean|Date}
+ * @return {string|number|boolean}
  */
 function flattenValue_(value) {
   if (value === null || value === undefined) {
@@ -1257,7 +1455,7 @@ function flattenValue_(value) {
   }
 
   if (value instanceof Date) {
-    return value;
+    return Utilities.formatDate(value, CONFIG.timezone, 'yyyy-MM-dd HH:mm:ss');
   }
 
   var type = typeof value;
