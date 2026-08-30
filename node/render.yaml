@@ -1,0 +1,40 @@
+# Render blueprint. Point Render at this repository and it builds the service;
+# fill the two Surense secrets in the dashboard afterwards.
+#
+# Cost: the web service fits the free tier. The database does not — free
+# Postgres on Render expires 30 days after creation, so the cheapest paid plan
+# is the realistic floor for anything meant to keep running.
+
+services:
+  - type: web
+    name: surense-sync
+    runtime: node
+    plan: free
+    rootDir: node
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: SURENSE_CLIENT_ID
+        sync: false          # set in the dashboard, never in this file
+      - key: SURENSE_CLIENT_SECRET
+        sync: false
+      - key: API_TOKEN
+        generateValue: true  # Render generates and stores a strong value
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: surense-db
+          property: connectionString
+      - key: TIMEZONE
+        value: Asia/Jerusalem
+      - key: ACTIVE_DAYS
+        value: 0,1,2,3,4,5
+      - key: ACTIVE_HOURS
+        value: 8,9,10,11,12,13,14,15,16,17,18,19,20
+
+databases:
+  - name: surense-db
+    plan: basic-256mb        # free expires after 30 days; this does not
+    postgresMajorVersion: "16"
