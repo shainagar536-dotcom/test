@@ -438,6 +438,97 @@ export function createApi({ db, config }) {
     };
   });
 
+  // ----------------------------------------------------------- diagnostics
+  // The whole state of the system in one response, for pasting into a
+  // conversation with someone helping. Deliberately carries no customer
+  // names, phone numbers or email addresses: the point is to show whether
+  // the wiring is right, and that never requires anyone's personal details.
+  route('GET', /^\/api\/diagnostics$/, async () => {
+    const [sample] = await db.listLeads({ limit: 1 });
+    const runs = await db.recentRuns(3);
+    const templates = await db.listTemplates();
+    const recipients = await db.listRecipients();
+    const pending = await db.listChanges({ pendingOnly: true, limit: 1000 });
+    const sources = sample ? await db.listSourcesInUse(config.messaging.columns.source) : [];
+
+    const names = sample ? Object.keys(sample.fields) : [];
+
+    // Values for the two columns whose content has to be recognisable to
+    // confirm the mapping — a status and a partner name, neither personal.
+    // For the two that identify a customer, only the shape is reported.
+    const describe = (role, name) => {
+      const exists = names.includes(name);
+      const value = exists ? String(sample.fields[name] ?? '') : '';
+
+      const shown = ['status', 'source'].includes(role)
+        ? value.slice(0, 60)
+        : (value ? `<${value.length} chars>` : '');
+
+      return { name, exists, sample: shown || null };
+    };
+
+    const HINTS = {
+      status: ['סטטוס', 'status'],
+      source: ['מקור', 'מפנה', 'source', 'referr'],
+      clientName: ['שם', 'לקוח', 'name', 'client', 'customer'],
+      leadNumber: ['מספר', 'number', 'מזהה', 'id']
+    };
+
+    return {
+      generatedAt: new Date().toISOString(),
+
+      counts: {
+        leads: await db.countLeads(),
+        distinctSources: sources.length,
+        sourcesWithRecipient: sources.filter(source => source.has_recipient).length,
+        templates: templates.length,
+        activeTemplates: templates.filter(template => template.active).length,
+        recipients: recipients.length,
+        recipientsWithEmail: recipients.filter(recipient => recipient.email).length,
+        pendingChanges: pending.length,
+        columnsInCrm: names.length
+      },
+
+      // The four names the messaging layer reads, and whether they are real.
+      columns: Object.fromEntries(
+        Object.entries(config.messaging.columns)
+          .map(([role, name]) => [role, describe(role, name)])),
+
+      // Candidates for any that is not, by name and by having a value.
+      suggestions: Object.fromEntries(Object.entries(HINTS).map(([role, hints]) => [
+        role,
+        names.filter(name => hints.some(hint => name.toLowerCase().includes(hint)))
+          .filter(name => String(sample?.fields[name] ?? '') !== '')
+          .slice(0, 8)
+      ])),
+
+      settings: {
+        timeZone: config.sync.timeZone,
+        activeDays: config.sync.activeDays,
+        activeHours: config.sync.activeHours,
+        maxSendsPerRun: config.messaging.maxPerRun,
+        redirectAllTo: config.messaging.redirectAllTo || null,
+        shrinkGuard: config.sync.shrinkGuard,
+        svixSecretSet: Boolean(config.api.svixSecret)
+      },
+
+      recentRuns: runs.map(run => ({
+        at: run.started_at, trigger: run.trigger, ok: run.ok,
+        leads: run.leads_in_crm, added: run.added, updated: run.updated,
+        missing: run.missing, error: run.error
+      })),
+
+      // Busiest sources still without an address — names of partners, which
+      // is what the recipients file has to cover.
+      topSourcesWithoutRecipient: sources
+        .filter(source => !source.has_recipient)
+        .slice(0, 15)
+        .map(source => ({ source: source.source_name, leads: source.leads })),
+
+      statusTemplates: templates.map(template => template.status)
+    };
+  });
+
   // ------------------------------------------------------------------ sync
   // Called by whatever schedules the work. On Render's free tier the service
   // sleeps, so an external caller hitting this both wakes it and runs the sync.

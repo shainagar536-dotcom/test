@@ -544,3 +544,61 @@ test('the columns endpoint explains itself when nothing is synced', async () => 
   assert.equal(response.status, 409);
   assert.match((await response.json()).error, /Run POST \/api\/sync first/);
 });
+
+// ----------------------------------------------------------- diagnostics
+test('diagnostics reports the wiring in one response', async () => {
+  await db.pool.query(
+    `INSERT INTO leads (id, fields, hash, changed_at, change_type)
+     VALUES ('ld_1', $1, 'h', now(), 'בסיס')`,
+    [JSON.stringify({
+      'סטטוס': 'לא ענה',
+      'מקור מפנה': 'מטאור - אריאל',
+      'שם הלקוח': 'דנה כהן',
+      'מספר ליד': '8801'
+    })]);
+
+  await db.seedTemplates(SEED_TEMPLATES);
+
+  const report = await (await call('/api/diagnostics')).json();
+
+  assert.equal(report.counts.leads, 1);
+  assert.equal(report.counts.templates, 8);
+  assert.equal(report.counts.recipients, 0);
+  assert.equal(report.counts.columnsInCrm, 4);
+
+  assert.equal(report.columns.status.exists, true);
+  assert.equal(report.settings.timeZone, 'Asia/Jerusalem');
+  assert.equal(report.settings.maxSendsPerRun, 25);
+});
+
+test('diagnostics shows status and source values but never a customer name', async () => {
+  await db.pool.query(
+    `INSERT INTO leads (id, fields, hash, changed_at, change_type)
+     VALUES ('ld_1', $1, 'h', now(), 'בסיס')`,
+    [JSON.stringify({
+      'סטטוס': 'לא ענה',
+      'מקור מפנה': 'מטאור - אריאל',
+      'שם הלקוח': 'דנה כהן',
+      'מספר ליד': '8801'
+    })]);
+
+  const report = await (await call('/api/diagnostics')).json();
+  const serialized = JSON.stringify(report);
+
+  // A status and a partner name have to be readable to confirm the mapping.
+  assert.equal(report.columns.status.sample, 'לא ענה');
+  assert.equal(report.columns.source.sample, 'מטאור - אריאל');
+
+  // The customer's own details are shape-only — this output is meant to be
+  // pasted into a conversation.
+  assert.equal(report.columns.clientName.sample, '<7 chars>');
+  assert.equal(serialized.includes('דנה כהן'), false,
+    'no customer name may appear anywhere in the response');
+  assert.equal(serialized.includes('8801'), false,
+    'nor an identifying lead number');
+});
+
+test('diagnostics needs a token', async () => {
+  const response = await fetch(`${baseUrl}/api/diagnostics`);
+  assert.equal(response.status, 401);
+});
