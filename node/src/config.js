@@ -37,17 +37,36 @@ export function loadDotEnv(path = '.env') {
   }
 }
 
-function required(name) {
+/**
+ * Collected rather than thrown one at a time.
+ *
+ * Failing on the first missing variable costs a deploy cycle per variable —
+ * fix one, redeploy, discover the next. Reporting all of them at once means
+ * one round trip.
+ */
+const missing = [];
+
+function required(name, hint = '') {
   const value = process.env[name];
 
   if (!value) {
-    throw new Error(
-      `Missing required environment variable ${name}.\n` +
-      '  Locally: add it to .env (see .env.example).\n' +
-      '  On Render: Service -> Environment -> Add Environment Variable.');
+    missing.push(hint ? `${name} — ${hint}` : name);
+    return '';
   }
 
   return value;
+}
+
+/** Throws once, listing everything that was not set. */
+function assertComplete() {
+  if (!missing.length) return;
+
+  throw new Error(
+    `Missing ${missing.length} required environment variable(s):\n` +
+    missing.map(name => `  - ${name}`).join('\n') +
+    '\n\n  On Render: Service -> Environment -> Add Environment Variable.' +
+    '\n  Locally:   add them to .env (see .env.example).' +
+    '\n\n  Note: an empty value counts as missing.');
 }
 
 function optional(name, fallback) {
@@ -83,11 +102,13 @@ function number(name, fallback) {
 
 export function loadConfig() {
   loadDotEnv();
+  missing.length = 0;
 
-  return {
+  const config = {
     surense: {
-      clientId: required('SURENSE_CLIENT_ID'),
-      clientSecret: required('SURENSE_CLIENT_SECRET'),
+      clientId: required('SURENSE_CLIENT_ID', 'the cid_... from Surense'),
+      clientSecret: required('SURENSE_CLIENT_SECRET',
+        'the csk_... from Surense; an empty value is not enough'),
       tokenUrl: optional('SURENSE_TOKEN_URL', 'https://api.surense.com/oauth/token'),
 
       // The token's aud claim and the integration notes name different hosts;
@@ -102,7 +123,8 @@ export function loadConfig() {
 
     database: {
       // Render injects this for its managed Postgres.
-      url: required('DATABASE_URL'),
+      url: required('DATABASE_URL',
+        'create a Postgres in Render and paste its Internal Database URL'),
       // Render's managed Postgres presents a certificate the default trust
       // store does not carry; its own docs prescribe this for external URLs.
       ssl: optional('DATABASE_SSL', 'true') === 'true'
@@ -116,7 +138,9 @@ export function loadConfig() {
 
       // The API serves customer names and phone numbers. A token is required,
       // not optional — see the note in api/server.js.
-      token: required('API_TOKEN'),
+      token: required('API_TOKEN',
+        'run: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))" ' +
+        'and paste the OUTPUT, not the command'),
 
       // Shared secret a webhook sender must present as a bearer token.
       // Separate from API_TOKEN so a sender can be revoked without cutting
@@ -184,6 +208,10 @@ export function loadConfig() {
       redirectAllTo: optional('REDIRECT_ALL_TO', '')
     }
   };
+
+  assertComplete();
+
+  return config;
 }
 
 /**
