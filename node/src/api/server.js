@@ -386,6 +386,58 @@ export function createApi({ db, config }) {
     };
   });
 
+  // --------------------------------------------------------------- columns
+  // Which of the CRM's fields the messaging layer is pointed at, and whether
+  // those names actually exist. With a hundred-odd fields, finding the right
+  // four by reading a JSON dump is the kind of task that gets done wrong.
+  route('GET', /^\/api\/columns$/, async () => {
+    const [sample] = await db.listLeads({ limit: 1 });
+
+    if (!sample) {
+      return { status: 409, body: {
+        error: 'No leads stored yet. Run POST /api/sync first.' } };
+    }
+
+    const names = Object.keys(sample.fields);
+
+    // A field is a candidate when its name contains one of these and it
+    // actually holds something in the sample.
+    const HINTS = {
+      status: ['סטטוס', 'status'],
+      source: ['מקור', 'מפנה', 'source', 'referr'],
+      clientName: ['שם', 'לקוח', 'name', 'client', 'customer'],
+      leadNumber: ['מספר', 'number', 'מזהה', 'id']
+    };
+
+    const suggest = (hints) => names
+      .filter(name => hints.some(hint => name.toLowerCase().includes(hint)))
+      .map(name => ({ name, sample: String(sample.fields[name] ?? '').slice(0, 40) }))
+      .filter(entry => entry.sample !== '')
+      .slice(0, 12);
+
+    const configured = config.messaging.columns;
+
+    return {
+      totalColumns: names.length,
+
+      // The four the messaging layer reads, and whether each one is real.
+      configured: Object.fromEntries(
+        Object.entries(configured).map(([role, name]) => [role, {
+          name,
+          exists: names.includes(name),
+          sample: names.includes(name)
+            ? String(sample.fields[name] ?? '').slice(0, 60)
+            : null
+        }])),
+
+      // What to use instead, for any that does not exist.
+      suggestions: Object.fromEntries(
+        Object.entries(HINTS).map(([role, hints]) => [role, suggest(hints)])),
+
+      allColumns: names
+    };
+  });
+
   // ------------------------------------------------------------------ sync
   // Called by whatever schedules the work. On Render's free tier the service
   // sleeps, so an external caller hitting this both wakes it and runs the sync.

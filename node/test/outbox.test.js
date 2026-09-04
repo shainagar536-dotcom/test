@@ -487,3 +487,60 @@ test('the outbox routes need a token like everything else', async () => {
     assert.equal(response.status, 401, `${path} must require a token`);
   }
 });
+
+// --------------------------------------------------------------- columns
+test('the columns endpoint says whether each configured name is real', async () => {
+  await db.pool.query(
+    `INSERT INTO leads (id, fields, hash, changed_at, change_type)
+     VALUES ('ld_1', $1, 'h', now(), 'בסיס')`,
+    [JSON.stringify({
+      'סטטוס': 'לא ענה',
+      'שם הלקוח': 'דנה כהן',
+      'מקור הליד': 'מטאור',        // note: NOT the configured "מקור מפנה"
+      'מספר ליד': '8801',
+      'טלפון': '0501234567'
+    })]);
+
+  const report = await (await call('/api/columns')).json();
+
+  assert.equal(report.totalColumns, 5);
+  assert.equal(report.configured.status.exists, true);
+  assert.equal(report.configured.status.sample, 'לא ענה');
+
+  // The misconfigured one is flagged, which is the whole point.
+  assert.equal(report.configured.source.exists, false);
+  assert.equal(report.configured.source.sample, null);
+});
+
+test('the columns endpoint suggests what to use instead', async () => {
+  await db.pool.query(
+    `INSERT INTO leads (id, fields, hash, changed_at, change_type)
+     VALUES ('ld_1', $1, 'h', now(), 'בסיס')`,
+    [JSON.stringify({ 'מקור הליד': 'מטאור', 'סטטוס': 'לא ענה' })]);
+
+  const report = await (await call('/api/columns')).json();
+
+  assert.deepEqual(report.suggestions.source.map(entry => entry.name),
+    ['מקור הליד']);
+});
+
+test('a field that exists but is empty is not suggested', async () => {
+  // Suggesting a column that is always blank would send everyone the same
+  // empty value and look like the automation is broken.
+  await db.pool.query(
+    `INSERT INTO leads (id, fields, hash, changed_at, change_type)
+     VALUES ('ld_1', $1, 'h', now(), 'בסיס')`,
+    [JSON.stringify({ 'מקור ריק': '', 'מקור מלא': 'מטאור' })]);
+
+  const report = await (await call('/api/columns')).json();
+
+  assert.deepEqual(report.suggestions.source.map(entry => entry.name),
+    ['מקור מלא']);
+});
+
+test('the columns endpoint explains itself when nothing is synced', async () => {
+  const response = await call('/api/columns');
+
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /Run POST \/api\/sync first/);
+});

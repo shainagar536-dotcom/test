@@ -132,6 +132,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `GET`/`PUT` | `/api/recipients` | מקור ← מייל |
 | `DELETE` | `/api/recipients/:source` | מחיקת נמען |
 | `GET` | `/api/sources` | כל המקורות בשימוש, מהעמוס לדל, עם דגל כיסוי |
+| `GET` | `/api/columns` | האם ארבעת שמות העמודות נכונים, ומה להשתמש במקומם |
 | `POST` | `/api/recipients/import` | יבוא CSV. תצוגה מקדימה כברירת מחדל, `?apply=true` כדי לכתוב |
 
 ---
@@ -359,7 +360,7 @@ createdb surense_test
 TEST_DATABASE_URL=postgresql://localhost/surense_test npm test
 ```
 
-**96 בדיקות אינטגרציה** מול Postgres אמיתי — רק ה-CRM מדומה. מסד הנתונים, הסנכרון, שרת ה-HTTP והניתוב הם האמיתיים, אז מה שעובר כאן הוא מה שרץ ב-Render.
+**100 בדיקות אינטגרציה** מול Postgres אמיתי — רק ה-CRM מדומה. מסד הנתונים, הסנכרון, שרת ה-HTTP והניתוב הם האמיתיים, אז מה שעובר כאן הוא מה שרץ ב-Render.
 
 מכוסים: ריצת בסיס, זיהוי שינוי ברמת השדה, שימור חותמות, ליד חדש, ליד שנעלם (וסימון שלא חוזר על עצמו), שלושת מקרי הסירוב, אימות ב-API, תפיסת שינויים פעם אחת בלבד, cursor שלא זז אחורה, דפדוף ב-`sinceId`, קליטת webhook, הרשימה הסגורה של הנוסחים, נרמול שמות מקורות, בלם ההצפה על שני צדי הגבול, וזריעה שלא דורסת עריכות.
 
