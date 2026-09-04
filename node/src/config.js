@@ -118,9 +118,15 @@ export function loadConfig() {
       // not optional — see the note in api/server.js.
       token: required('API_TOKEN'),
 
-      // Shared secret a webhook sender must present. Separate from API_TOKEN
-      // so a sender can be revoked without cutting off every reader.
-      webhookSecret: optional('WEBHOOK_SECRET', '')
+      // Shared secret a webhook sender must present as a bearer token.
+      // Separate from API_TOKEN so a sender can be revoked without cutting
+      // off every reader. Used by senders that can set a header.
+      webhookSecret: optional('WEBHOOK_SECRET', ''),
+
+      // Surense delivers through Svix, which signs the body rather than
+      // sending a header token. This is the endpoint's signing secret, shown
+      // in the Svix dashboard after the endpoint is created: whsec_...
+      svixSecret: optional('SVIX_WEBHOOK_SECRET', '')
     },
 
     sync: {

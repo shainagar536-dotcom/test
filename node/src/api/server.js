@@ -12,6 +12,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { runSync, syncInProgress } from '../sync/run.js';
 import { buildOutbox, summarizeSkips } from '../notify/outbox.js';
 import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
+import { verifySvixSignature } from './svix.js';
 import { normalizeText } from '../mirror.js';
 
 /**
@@ -396,15 +397,54 @@ export function createApi({ db, config }) {
     ({ runs: await db.recentRuns(Number(url.searchParams.get('limit') ?? 20)) }));
 
   // --------------------------------------------------------------- webhook
-  // Surense has no webhooks today. This exists so that a push from Surense or
-  // any other system is captured verbatim the moment it starts arriving,
-  // rather than being dropped while support for it is written.
+  // Surense delivers through Svix, which signs the body instead of sending a
+  // header token — so this route does its own authentication rather than
+  // using the bearer check, which needs the raw body to verify against.
+  //
+  // Two ways in are accepted: a valid Svix signature, or a bearer token for a
+  // sender that can set headers and for testing by hand.
   route('POST', /^\/webhook\/([a-z0-9_-]{1,40})$/i, async (request, params) => {
-    const payload = await readJsonBody(request);
+    // The body must be verified exactly as it arrived: re-serialized JSON
+    // would differ in key order and spacing, and never match the signature.
+    const rawBody = await readTextBody(request);
+
+    const bearer = (request.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+    const expectedBearer = config.api.webhookSecret || config.api.token;
+
+    let authorizedBy = null;
+
+    if (bearer && secretsMatch(bearer, expectedBearer)) {
+      authorizedBy = 'bearer';
+    } else {
+      const check = verifySvixSignature({
+        headers: request.headers, rawBody, secret: config.api.svixSecret
+      });
+
+      if (check.ok) authorizedBy = 'svix-signature';
+      else {
+        return { status: 401, body: {
+          error: 'Unverified webhook delivery.',
+          svix: check.reason,
+          hint: 'Set SVIX_WEBHOOK_SECRET to the endpoint signing secret ' +
+            '(whsec_...) from the Svix dashboard, or send a bearer token.'
+        } };
+      }
+    }
+
+    let payload;
+
+    try {
+      payload = rawBody.trim() ? JSON.parse(rawBody) : {};
+    } catch {
+      return { status: 400, body: { error: 'Body was not valid JSON.' } };
+    }
+
     const id = await db.recordWebhook(params[0], payload);
 
-    return { received: true, id };
-  }, { auth: 'webhook' });
+    // The event type decides nothing yet — the delivery is stored verbatim so
+    // no event is lost while its handling is written.
+    return { received: true, id, authorizedBy, event: payload.type ?? payload.event ?? null };
+  }, { auth: false });
 
   route('GET', /^\/api\/webhooks$/, async (_request, _params, url) =>
     ({ events: await db.listWebhookEvents({

@@ -23,6 +23,8 @@ services:
         generateValue: true  # Render generates and stores a strong value
       - key: WEBHOOK_SECRET
         generateValue: true
+      - key: SVIX_WEBHOOK_SECRET
+        sync: false          # paste the whsec_... from the Svix dashboard
       - key: DATABASE_URL
         fromDatabase:
           name: surense-db
