@@ -432,6 +432,55 @@ test('the sources worklist shows which need an address, busiest first', async ()
   assert.equal(sources[0].has_recipient, false);
 });
 
+// ------------------------------------------------------------- pilot mode
+test('a redirect sends everything to one address and says who it was for', () => {
+  const { ready } = buildOutbox({
+    changes: [change(1, 'לא ענה')],
+    templates: templateMap([{ status: 'לא ענה', message: 'אין מענה 1' }]),
+    recipients: recipientMap([
+      { source_name: 'מטאור - אריאל יואב דביר', email: 'ariel@example.com' }]),
+    columns: COLUMNS,
+    messaging: { ...MESSAGING, redirectAllTo: 'shai@example.com' }
+  });
+
+  assert.equal(ready[0].to, 'shai@example.com', 'the real source must not receive it');
+  assert.equal(ready[0].intendedFor, 'ariel@example.com');
+  assert.equal(ready[0].redirected, true);
+
+  // The marker makes it impossible to mistake a pilot message for a real one.
+  assert.match(ready[0].subject, /^\[פיילוט → ariel@example\.com\]/);
+
+  // The body stays exactly as it would go out for real, so the pilot tests
+  // the wording that will actually be sent.
+  assert.match(ready[0].body, /אין מענה 1/);
+  assert.ok(!ready[0].body.includes('פיילוט'));
+});
+
+test('with no redirect set the message goes to the real recipient', () => {
+  const { ready } = buildOutbox({
+    changes: [change(1, 'לא ענה')],
+    templates: templateMap([{ status: 'לא ענה', message: 'x' }]),
+    recipients: recipientMap([
+      { source_name: 'מטאור - אריאל יואב דביר', email: 'ariel@example.com' }]),
+    columns: COLUMNS,
+    messaging: { ...MESSAGING, redirectAllTo: '' }
+  });
+
+  assert.equal(ready[0].to, 'ariel@example.com');
+  assert.equal(ready[0].redirected, false);
+  assert.equal(ready[0].intendedFor, null);
+  assert.ok(!ready[0].subject.startsWith('['));
+});
+
+test('the outbox response always states whether a redirect is active', async () => {
+  const response = await (await call('/api/outbox')).json();
+
+  // Present on every response, so one left on by accident cannot be missed
+  // and one left off before going live is obvious.
+  assert.ok('redirectAllTo' in response);
+  assert.equal(response.redirectAllTo, null);
+});
+
 test('the outbox routes need a token like everything else', async () => {
   for (const path of ['/api/outbox', '/api/templates', '/api/recipients', '/api/sources']) {
     const response = await fetch(`${baseUrl}${path}`);

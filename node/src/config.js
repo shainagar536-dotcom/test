@@ -169,7 +169,13 @@ export function loadConfig() {
 
       // The flood brake. A bulk status edit in the CRM would otherwise fire
       // one real message per lead, and none of them can be recalled.
-      maxPerRun: number('MAX_SENDS_PER_RUN', 25)
+      maxPerRun: number('MAX_SENDS_PER_RUN', 25),
+
+      // Pilot safety net. While this holds an address, every message is
+      // addressed to it instead of to the referring source — real leads, real
+      // statuses, real wording, and nobody outside can receive one by
+      // accident. Clearing it is the deliberate act that goes live.
+      redirectAllTo: optional('REDIRECT_ALL_TO', '')
     }
   };
 }

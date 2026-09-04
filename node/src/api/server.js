@@ -239,6 +239,9 @@ export function createApi({ db, config }) {
     return {
       pendingChanges: changes.length,
       readyToSend: ready.length,
+      // Surfaced on every response so a redirect left on by accident is
+      // impossible to miss, and one left off before going live is obvious.
+      redirectAllTo: config.messaging.redirectAllTo || null,
       floodBrake,
       skipped: summarizeSkips(skipped),
       messages: ready

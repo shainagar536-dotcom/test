@@ -103,15 +103,24 @@ export function buildOutbox({ changes, templates, recipients, columns, messaging
       signature: messaging.signature
     };
 
+    // While a redirect address is set, nothing reaches the real source. The
+    // intended address travels with the message so a pilot run still shows
+    // exactly who would have received it.
+    const redirected = Boolean(messaging.redirectAllTo);
+
     ready.push({
       changeId: change.id,
       leadId: change.lead_id,
       channel: template.channel,
-      to: address,
+      to: redirected ? messaging.redirectAllTo : address,
+      intendedFor: redirected ? address : null,
+      redirected,
       recipient: recipient.source_name,
       status,
       statusBefore: change.before_value ?? '',
-      subject: render(messaging.subject, values),
+      subject: redirected
+        ? `[פיילוט → ${address}] ${render(messaging.subject, values)}`
+        : render(messaging.subject, values),
       body: render(messaging.body, values),
       occurredAt: change.occurred_at
     });
