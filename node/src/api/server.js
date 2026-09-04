@@ -11,6 +11,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { runSync, syncInProgress } from '../sync/run.js';
 import { buildOutbox, summarizeSkips } from '../notify/outbox.js';
+import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
 import { normalizeText } from '../mirror.js';
 
 /**
@@ -48,6 +49,19 @@ function send(response, status, body, headers = {}) {
   });
 
   response.end(text);
+}
+
+async function readTextBody(request, limitBytes = 5_000_000) {
+  const chunks = [];
+  let size = 0;
+
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > limitBytes) throw new Error('Request body too large.');
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 async function readJsonBody(request, limitBytes = 1_000_000) {
@@ -298,6 +312,58 @@ export function createApi({ db, config }) {
     }
 
     return { saved: saved.length, recipients: saved };
+  });
+
+  // Bulk import of the recipients file, as CSV pasted straight from Excel.
+  //
+  // Defaults to a preview. Name matching is the expensive failure here — a
+  // row matching no source never fires and nothing complains — so the import
+  // shows what would happen and what would not match, and only writes when
+  // asked to.
+  route('POST', /^\/api\/recipients\/import$/, async (request, _params, url) => {
+    const text = await readTextBody(request);
+
+    if (!text.trim()) {
+      return { status: 400, body: { error: 'Send the CSV as the request body.' } };
+    }
+
+    let parsed;
+
+    try {
+      parsed = buildRecipients(parseCsv(text));
+    } catch (error) {
+      return { status: 400, body: { error: error.message } };
+    }
+
+    const { recipients, rejected, columns } = parsed;
+    const sourcesInUse = await db.listSourcesInUse(config.messaging.columns.source);
+    const report = reconcile(recipients, sourcesInUse);
+
+    // apply=true is the deliberate second call, after the preview was read.
+    const apply = url.searchParams.get('apply') === 'true';
+    let saved = 0;
+
+    if (apply) {
+      for (const recipient of recipients) {
+        await db.saveRecipient(recipient);
+        saved++;
+      }
+    }
+
+    return {
+      applied: apply,
+      saved,
+      parsed: recipients.length,
+      rejected,
+      // Which column of the file was read as what, so a wrong guess is
+      // visible in the preview rather than silently importing blank emails.
+      columnsDetected: Object.fromEntries(
+        Object.entries(columns).map(([field, index]) => [field, index === -1 ? null : index])),
+      ...report,
+      note: apply
+        ? undefined
+        : 'Nothing was written. Repeat with ?apply=true once this looks right.'
+    };
   });
 
   route('DELETE', /^\/api\/recipients\/(.+)$/, async (_request, params) => {

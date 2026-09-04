@@ -101,6 +101,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `GET`/`PUT` | `/api/recipients` | מקור ← מייל |
 | `DELETE` | `/api/recipients/:source` | מחיקת נמען |
 | `GET` | `/api/sources` | כל המקורות בשימוש, מהעמוס לדל, עם דגל כיסוי |
+| `POST` | `/api/recipients/import` | יבוא CSV. תצוגה מקדימה כברירת מחדל, `?apply=true` כדי לכתוב |
 
 ---
 
@@ -126,6 +127,47 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json
   -d '[{"sourceName":"מטאור - אריאל יואב דביר","email":"ariel@example.com"}]' \
   $URL/api/recipients
 ```
+
+### יבוא קובץ הנמענים
+
+יש לך כבר קובץ עם המיילים. שמור אותו כ-CSV מאקסל (File → Save As → CSV UTF-8) ו:
+
+```bash
+# 1. תצוגה מקדימה — לא כותב כלום
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/csv" \
+  --data-binary @recipients.csv $URL/api/recipients/import
+
+# 2. אחרי שבדקת את הדוח
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/csv" \
+  --data-binary @recipients.csv "$URL/api/recipients/import?apply=true"
+```
+
+**קרא את התצוגה המקדימה לפני שאתה מאשר.** זה מה שהיא מחזירה:
+
+```json
+{
+  "applied": false,
+  "parsed": 47,
+  "matchedSources": 41,
+  "matchedLeads": 1832,
+  "unmatchedFileRows": ["סוכנות ישנה - דוד", "מטאור-צפון"],
+  "sourcesWithoutAddress": [
+    { "source": "קמפיין", "leads": 485 },
+    { "source": "חבר מביא חבר", "leads": 291 }
+  ],
+  "rejected": [{ "line": 12, "reason": "malformed-email", "detail": "ariel at example.com" }],
+  "columnsDetected": { "sourceName": 0, "email": 1, "whatsapp": 2, "active": null }
+}
+```
+
+| שדה | למה זה חשוב |
+|---|---|
+| `matchedLeads` | כמה לידים מכוסים בפועל — לא כמה שורות בקובץ |
+| `unmatchedFileRows` | שורות שלא תואמות **שום** מקור בלידים. אלה שקטות לנצח — שם שהשתנה או טעות הקלדה |
+| `sourcesWithoutAddress` | מקורות עם לידים שאין להם כתובת, מהעמוס לדל |
+| `columnsDetected` | איזו עמודה נקראה כמה. ניחוש שגוי כאן בולט מיד |
+
+**כותרות מזוהות אוטומטית**, בעברית ובאנגלית, בכל סדר: `מקור`/`source`, `מייל`/`דוא"ל`/`email`, `וואטספ`/`טלפון`, `פעיל`/`active`. יבוא חוזר **מעדכן** ולא מכפיל.
 
 ### מאיפה מתחילים למלא
 
@@ -286,7 +328,7 @@ createdb surense_test
 TEST_DATABASE_URL=postgresql://localhost/surense_test npm test
 ```
 
-**45 בדיקות אינטגרציה** מול Postgres אמיתי — רק ה-CRM מדומה. מסד הנתונים, הסנכרון, שרת ה-HTTP והניתוב הם האמיתיים, אז מה שעובר כאן הוא מה שרץ ב-Render.
+**68 בדיקות אינטגרציה** מול Postgres אמיתי — רק ה-CRM מדומה. מסד הנתונים, הסנכרון, שרת ה-HTTP והניתוב הם האמיתיים, אז מה שעובר כאן הוא מה שרץ ב-Render.
 
 מכוסים: ריצת בסיס, זיהוי שינוי ברמת השדה, שימור חותמות, ליד חדש, ליד שנעלם (וסימון שלא חוזר על עצמו), שלושת מקרי הסירוב, אימות ב-API, תפיסת שינויים פעם אחת בלבד, cursor שלא זז אחורה, דפדוף ב-`sinceId`, קליטת webhook, הרשימה הסגורה של הנוסחים, נרמול שמות מקורות, בלם ההצפה על שני צדי הגבול, וזריעה שלא דורסת עריכות.
 
