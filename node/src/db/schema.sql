@@ -80,9 +80,22 @@ CREATE TABLE IF NOT EXISTS webhook_events (
     id           BIGSERIAL PRIMARY KEY,
     received_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     source       TEXT        NOT NULL,
+
+    -- The sender's own message id. Svix retries a failed delivery with the
+    -- SAME id, so without this a retry would record the status change twice
+    -- and the referring source would be told twice.
+    external_id  TEXT,
+
     payload      JSONB       NOT NULL,
-    processed_at TIMESTAMPTZ
+    processed_at TIMESTAMPTZ,
+    result       TEXT
 );
+
+ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS external_id TEXT;
+ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS result TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS webhook_external_idx
+    ON webhook_events (external_id) WHERE external_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS webhook_pending_idx
     ON webhook_events (received_at) WHERE processed_at IS NULL;

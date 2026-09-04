@@ -12,7 +12,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { runSync, syncInProgress } from '../sync/run.js';
 import { buildOutbox, summarizeSkips } from '../notify/outbox.js';
 import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
-import { verifySvixSignature } from './svix.js';
+import { verifySvixSignature, readSignatureHeaders } from './svix.js';
+import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
 
 /**
@@ -439,16 +440,58 @@ export function createApi({ db, config }) {
       return { status: 400, body: { error: 'Body was not valid JSON.' } };
     }
 
-    const id = await db.recordWebhook(params[0], payload);
+    // The sender's own message id, so a retry of a delivery that failed once
+    // does not record the same status change twice.
+    const { id: messageId } = readSignatureHeaders(request.headers);
 
-    // The event type decides nothing yet — the delivery is stored verbatim so
-    // no event is lost while its handling is written.
-    return { received: true, id, authorizedBy, event: payload.type ?? payload.event ?? null };
+    const stored = await db.recordWebhook(params[0], payload, messageId || null);
+
+    if (stored.duplicate) {
+      return {
+        received: true, duplicate: true, authorizedBy,
+        note: 'Already handled — this message id was delivered before.'
+      };
+    }
+
+    let outcome;
+
+    try {
+      outcome = await recordDelivery({
+        db, payload,
+        columns: config.messaging.columns,
+        timeZone: config.sync.timeZone
+      });
+    } catch (error) {
+      // The delivery is stored either way, so it can be replayed once the
+      // cause is fixed. Answering 200 stops Surense retrying something that
+      // will fail identically every time.
+      await db.finishWebhook(stored.id, `error: ${error.message}`);
+
+      return { received: true, id: stored.id, recorded: false, error: error.message };
+    }
+
+    await db.finishWebhook(stored.id,
+      outcome.recorded ? `recorded change ${outcome.changeIds.join(',')}` : outcome.reason);
+
+    return {
+      received: true,
+      id: stored.id,
+      authorizedBy,
+      eventType: payload.eventType ?? payload.type ?? null,
+      recorded: outcome.recorded,
+      reason: outcome.reason,
+      changeIds: outcome.changeIds,
+      statusChange: outcome.event
+        ? `${outcome.event.statusBefore} -> ${outcome.event.statusAfter}`
+        : null
+    };
   }, { auth: false });
 
+  // Everything by default; ?pending=true narrows to deliveries that were
+  // stored but never handled, which is the "something is stuck" view.
   route('GET', /^\/api\/webhooks$/, async (_request, _params, url) =>
     ({ events: await db.listWebhookEvents({
-      pendingOnly: url.searchParams.get('pending') !== 'false',
+      pendingOnly: url.searchParams.get('pending') === 'true',
       limit: Number(url.searchParams.get('limit') ?? 100)
     }) }));
 

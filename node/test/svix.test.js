@@ -169,7 +169,7 @@ test('a signed delivery is accepted and stored verbatim', async () => {
 
   const result = await response.json();
   assert.equal(result.authorizedBy, 'svix-signature');
-  assert.equal(result.event, 'lead.status.updated');
+  assert.equal(result.eventType, 'lead.status.updated');
 
   const events = await db.listWebhookEvents({});
   assert.equal(events.length, 1);

@@ -459,19 +459,105 @@ export class Database {
   /**
    * Stores a webhook delivery exactly as received.
    *
+   * Returns `duplicate: true` when the sender's message id has been seen
+   * before. Svix retries a failed delivery with the same id, so without this
+   * a retry after a transient failure would record the change a second time
+   * and the referring source would be told twice.
+   *
    * @param {string} source
    * @param {object} payload
-   * @returns {Promise<number>}
+   * @param {?string} [externalId]  The sender's message id (svix-id).
+   * @returns {Promise<{id: ?number, duplicate: boolean}>}
    */
-  async recordWebhook(source, payload) {
+  async recordWebhook(source, payload, externalId = null) {
     const { rows } = await this.pool.query(
-      'INSERT INTO webhook_events (source, payload) VALUES ($1, $2) RETURNING id',
-      [source, JSON.stringify(payload)]);
+      `INSERT INTO webhook_events (source, external_id, payload)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [source, externalId, JSON.stringify(payload)]);
 
-    return rows[0].id;
+    if (!rows.length) return { id: null, duplicate: true };
+
+    return { id: rows[0].id, duplicate: false };
   }
 
-  async listWebhookEvents({ pendingOnly = true, limit = 100 } = {}) {
+  /**
+   * Marks a stored delivery as handled, with what came of it.
+   *
+   * @param {number} id
+   * @param {string} result
+   */
+  async finishWebhook(id, result) {
+    if (!id) return;
+
+    await this.pool.query(
+      'UPDATE webhook_events SET processed_at = now(), result = $2 WHERE id = $1',
+      [id, String(result).slice(0, 500)]);
+  }
+
+  /**
+   * Records a status change reported by a webhook, and moves the stored lead
+   * to match.
+   *
+   * Both in one transaction: a change row without the matching lead update
+   * would make the next poll see the old value and record the same move a
+   * second time.
+   *
+   * @param {object} input
+   * @param {string} input.leadId
+   * @param {string} input.statusColumn
+   * @param {string} input.before
+   * @param {string} input.after
+   * @param {?string} [input.occurredAt]  The event's own timestamp.
+   * @returns {Promise<Array<number>>} the change ids created
+   */
+  async recordWebhookChange({ leadId, statusColumn, before, after, occurredAt }) {
+    const client = await this.pool.connect();
+    const when = occurredAt ? new Date(occurredAt) : new Date();
+    const at = Number.isNaN(when.getTime()) ? new Date() : when;
+
+    try {
+      await client.query('BEGIN');
+
+      const { rows } = await client.query(
+        `INSERT INTO changes
+           (lead_id, change_type, column_name, before_value, after_value, occurred_at)
+         VALUES ($1, 'עודכן', $2, $3, $4, $5)
+         RETURNING id`,
+        [leadId, statusColumn, before, after, at]);
+
+      // The mirror has to move too, or the next poll compares against the old
+      // status and records the identical change again.
+      await client.query(
+        `UPDATE leads
+            SET fields      = jsonb_set(fields, ARRAY[$2::text], to_jsonb($3::text), true),
+                changed_at  = $4,
+                change_type = 'עודכן',
+                hash        = 'webhook:' || md5(random()::text)
+          WHERE id = $1`,
+        [leadId, statusColumn, after, at]);
+
+      await client.query('COMMIT');
+
+      return rows.map(row => row.id);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Stored deliveries, newest work first.
+   *
+   * Defaults to everything rather than to unprocessed only: now that each
+   * delivery is handled on arrival, "unprocessed" means "stuck", and someone
+   * checking whether a webhook arrived at all would otherwise see an empty
+   * list and conclude it never came.
+   */
+  async listWebhookEvents({ pendingOnly = false, limit = 100 } = {}) {
     const { rows } = await this.pool.query(
       `SELECT * FROM webhook_events
         ${pendingOnly ? 'WHERE processed_at IS NULL' : ''}

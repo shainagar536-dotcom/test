@@ -6,7 +6,8 @@
   "private": true,
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "pretest": "bash scripts/test-db.sh"
   },
   "engines": {
     "node": ">=20"
