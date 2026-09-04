@@ -211,8 +211,6 @@ export function orderColumns(columns, idKey) {
  * @returns {Array<{key: string, label: string}>}
  */
 export function deriveColumns(leads, schema, idKey, sampleSize = 300) {
-  const labels = new Map(schema.map(field => [field.key, field.label]));
-
   // A key is worth a column when at least one lead has something in it.
   // Scanning a sample rather than every lead keeps this cheap on a large CRM
   // while still catching fields only some leads populate.
@@ -236,9 +234,15 @@ export function deriveColumns(leads, schema, idKey, sampleSize = 300) {
   // seen so the problem is visible in the output rather than silently empty.
   const keys = populated.size ? populated : seen;
 
-  return orderColumns(
-    [...keys].map(key => ({ key, label: labels.get(key) ?? key })),
-    idKey);
+  // Labelled by the lead's own key, deliberately, rather than by the schema's
+  // display name. The schema fetch is allowed to fail, and a key it describes
+  // gets a different label depending on whether it succeeded — so the same
+  // data would store as "סטטוס" on one run and "statusName" on the next,
+  // which reads as every column having been renamed and forces a rebaseline.
+  // A stable English key is worth more here than a pretty Hebrew one.
+  void schema;
+
+  return orderColumns([...keys].map(key => ({ key, label: key })), idKey);
 }
 
 /**

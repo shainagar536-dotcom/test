@@ -96,16 +96,15 @@ test('columns come from the leads, not from the schema', () => {
   assert.ok(keys.includes('customerName'));
 });
 
-test('a key the schema does describe gets its label', () => {
-  const columns = deriveColumns([lead(1)], SCHEMA, 'id');
+test('every column is labelled by its own key, schema or no schema', () => {
+  // The schema fetch is allowed to fail. If a key it describes were labelled
+  // differently when it succeeds, the same data would store under two
+  // different names on alternate runs and each would look like a rename.
+  const withSchema = deriveColumns([lead(1)], SCHEMA, 'id');
+  const withoutSchema = deriveColumns([lead(1)], [], 'id');
 
-  assert.equal(columns.find(column => column.key === 'statusName').label, 'סטטוס');
-});
-
-test('a key the schema does not describe keeps its own name', () => {
-  const columns = deriveColumns([lead(1)], SCHEMA, 'id');
-
-  assert.equal(columns.find(column => column.key === 'customerName').label, 'customerName');
+  assert.deepEqual(withSchema, withoutSchema, 'labels must not depend on the schema');
+  assert.equal(withSchema.find(column => column.key === 'statusName').label, 'statusName');
 });
 
 test('a field empty in every lead is not made into a column', () => {
@@ -137,7 +136,7 @@ test('a live sync stores columns that actually hold values', async () => {
 
   assert.ok(populated.length >= 4,
     `expected real values, got ${JSON.stringify(stored.fields)}`);
-  assert.equal(stored.fields.סטטוס, 'לא ענה');
+  assert.equal(stored.fields.statusName, 'לא ענה');
 });
 
 test('renamed columns re-baseline instead of reporting every row changed', async () => {

@@ -144,7 +144,7 @@ test('a changed field is recorded with its old and new value', async () => {
   const { changes } = await (await call('/api/changes')).json();
   assert.equal(changes.length, 1);
   assert.equal(changes[0].leadId, 'ld_2');
-  assert.equal(changes[0].column, 'סטטוס');
+  assert.equal(changes[0].column, 'statusName');
   assert.equal(changes[0].before, 'לא ענה');
   assert.equal(changes[0].after, 'לא עונה 3');
 });
@@ -153,7 +153,7 @@ test('a nested lookup is stored by its name, not as [object Object]', async () =
   await sync();
 
   const response = await (await call('/api/leads/ld_1')).json();
-  assert.equal(response.fields['סטטוס'], 'לא ענה');
+  assert.equal(response.fields.statusName, 'לא ענה');
 });
 
 test('an untouched lead keeps the timestamp of when it really changed', async () => {
