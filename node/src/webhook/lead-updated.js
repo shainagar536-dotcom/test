@@ -115,6 +115,12 @@ export function interpretDelivery(payload) {
   const statusBefore = statusEntry?.before ?? null;
   const statusAfter = statusEntry?.after ?? null;
 
+  // Surense puts unchanged fields in the diff too — a real delivery carried
+  // `closed: {before: false, after: false}`. A status entry whose two sides
+  // match is not a status change, and acting on it would notify the referring
+  // source about nothing.
+  const statusMoved = statusAfter !== null && String(statusBefore) !== String(statusAfter);
+
   const firstName = pick(payload, ['firstName']) ?? '';
   const lastName = pick(payload, ['lastName']) ?? '';
 
@@ -123,15 +129,17 @@ export function interpretDelivery(payload) {
   const clientName = pick(payload, ['customerName', 'fullName', 'name', 'clientName']) ??
     [firstName, lastName].filter(Boolean).join(' ') ?? null;
 
-  // Everything else that moved, kept so the history is complete even though
-  // only a status change is notifiable.
+  // Everything else that actually moved, kept so the history is complete even
+  // though only a status change is notifiable. Entries whose two sides match
+  // are dropped for the same reason as above.
   const otherChanges = Object.entries(diff)
     .filter(([field]) => !['statusName', 'status', 'statusId'].includes(field))
     .map(([field, value]) => ({
       field,
       before: value.before === undefined || value.before === null ? '' : String(value.before),
       after: value.after === undefined || value.after === null ? '' : String(value.after)
-    }));
+    }))
+    .filter(entry => entry.before !== entry.after);
 
   return {
     isLeadUpdate: true,
@@ -143,9 +151,9 @@ export function interpretDelivery(payload) {
       ? String(pick(payload, ['leadNumber', 'number'])) : null,
     clientName: clientName || null,
     statusBefore: statusBefore === null ? null : String(statusBefore),
-    statusAfter: statusAfter === null ? null : String(statusAfter),
+    statusAfter: statusMoved ? String(statusAfter) : null,
     otherChanges,
-    reason: statusAfter === null ? 'the status did not change in this event' : null
+    reason: statusMoved ? null : 'the status did not change in this event'
   };
 }
 

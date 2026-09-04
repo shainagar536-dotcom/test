@@ -126,11 +126,58 @@ test('a real delivery yields the status move', () => {
   assert.equal(event.occurredAt, '2026-09-04T13:25:41.412738803Z');
 });
 
-test('non-status changes are kept but held apart', () => {
-  const event = interpretDelivery(delivery());
+test('fields present in the diff but unchanged are not changes', () => {
+  // The second real delivery carried closed:{before:false,after:false} and
+  // statusSuccess:{before:false,after:false} — Surense lists the fields it
+  // looked at, not only the ones that moved.
+  const event = interpretDelivery(delivery({
+    diff: {
+      closed: { before: false, after: false },
+      statusId: { before: 'd2990176', after: 'acc8daca' },
+      statusName: { before: 'חדש', after: 'לא ענה' },
+      statusSuccess: { before: false, after: false }
+    }
+  }));
 
-  assert.deepEqual(event.otherChanges.map(c => c.field).sort(),
-    ['closed', 'statusSuccess']);
+  assert.equal(event.statusAfter, 'לא ענה', 'the real move is still seen');
+  assert.deepEqual(event.otherChanges, [],
+    'both no-op entries have matching sides, so neither is a change');
+});
+
+test('a non-status field that really moved is kept', () => {
+  const event = interpretDelivery(delivery({
+    diff: {
+      statusName: { before: 'חדש', after: 'לא ענה' },
+      closed: { before: false, after: true }
+    }
+  }));
+
+  assert.deepEqual(event.otherChanges,
+    [{ field: 'closed', before: 'false', after: 'true' }]);
+});
+
+test('a status whose two sides match is not a status change', () => {
+  // Without this the referring source would be told the status moved to the
+  // value it already had.
+  const event = interpretDelivery(delivery({
+    diff: { statusName: { before: 'לא ענה', after: 'לא ענה' } }
+  }));
+
+  assert.equal(event.statusAfter, null);
+  assert.match(event.reason, /status did not change/);
+});
+
+test('a no-op status delivery records nothing and sends nothing', async () => {
+  await seedLead('לא ענה');
+
+  const body = await (await send(delivery({
+    diff: { statusName: { before: 'לא ענה', after: 'לא ענה' } }
+  }))).json();
+
+  assert.equal(body.recorded, false);
+
+  const { rows } = await db.pool.query('SELECT count(*)::int AS n FROM changes');
+  assert.equal(rows[0].n, 0);
 });
 
 test('an event of another type is ignored, with the reason', () => {
