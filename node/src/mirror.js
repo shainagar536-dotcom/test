@@ -196,6 +196,52 @@ export function orderColumns(columns, idKey) {
 }
 
 /**
+ * Builds the column list from what the leads actually contain.
+ *
+ * The field schema and the search results do not use the same keys: the
+ * schema describes fields by one name while a returned lead carries another,
+ * so taking columns from the schema alone produced a hundred columns that
+ * were almost all empty. Deriving them from the leads guarantees every column
+ * has real data; the schema is then used only to give a key a nicer label.
+ *
+ * @param {Array<object>} leads
+ * @param {Array<{key: string, label: string}>} schema
+ * @param {string} idKey
+ * @param {number} [sampleSize]  How many leads to inspect for keys.
+ * @returns {Array<{key: string, label: string}>}
+ */
+export function deriveColumns(leads, schema, idKey, sampleSize = 300) {
+  const labels = new Map(schema.map(field => [field.key, field.label]));
+
+  // A key is worth a column when at least one lead has something in it.
+  // Scanning a sample rather than every lead keeps this cheap on a large CRM
+  // while still catching fields only some leads populate.
+  const populated = new Set();
+  const seen = new Set();
+
+  for (const lead of leads.slice(0, sampleSize)) {
+    if (!lead || typeof lead !== 'object') continue;
+
+    for (const [key, value] of Object.entries(lead)) {
+      seen.add(key);
+
+      if (value !== null && value !== undefined && value !== '' &&
+          !(Array.isArray(value) && value.length === 0)) {
+        populated.add(key);
+      }
+    }
+  }
+
+  // Nothing populated at all means the leads are unusable; keep every key
+  // seen so the problem is visible in the output rather than silently empty.
+  const keys = populated.size ? populated : seen;
+
+  return orderColumns(
+    [...keys].map(key => ({ key, label: labels.get(key) ?? key })),
+    idKey);
+}
+
+/**
  * Decides what the destination should contain after this run.
  *
  * @param {object} input

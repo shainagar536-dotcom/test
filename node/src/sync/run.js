@@ -5,7 +5,7 @@
  */
 
 import { SurenseClient } from '../surense.js';
-import { planSync, readExisting, orderColumns, headerFor } from '../mirror.js';
+import { planSync, readExisting, deriveColumns, headerFor } from '../mirror.js';
 
 /** Runs are serialised in-process; a second caller is told to wait. */
 let inFlight = null;
@@ -40,11 +40,10 @@ async function execute({ db, config, trigger, fetchImpl }) {
 
   try {
     const { scope } = await client.authenticate();
-    const columns = orderColumns(await client.fetchFields(), config.sync.idKey);
 
-    if (!columns.length) {
-      throw new Error('The CRM returned no field definitions.');
-    }
+    // The schema supplies labels only. Which columns exist is decided by the
+    // leads themselves — see deriveColumns.
+    const schema = await client.fetchFields().catch(() => []);
 
     const { leads, complete } = await client.fetchAllLeads();
 
@@ -75,7 +74,22 @@ async function execute({ db, config, trigger, fetchImpl }) {
         'was written. Set SHRINK_GUARD lower if the drop is genuine.');
     }
 
+    const columns = deriveColumns(leads, schema, config.sync.idKey);
+
+    if (!columns.length) {
+      throw new Error('The leads returned by the CRM carry no fields at all.');
+    }
+
     const existing = await db.loadExisting(columns);
+
+    if (existing.relabelled) {
+      // Worth saying out loud: this run rewrites every row and records no
+      // changes, which would otherwise look like the sync losing its history.
+      console.warn('Column names changed since the last sync ' +
+        `(${existing.relabelled.overlap} of ${existing.relabelled.newColumns} ` +
+        'in common). Recording a fresh baseline; no changes will be reported ' +
+        'for this run.');
+    }
 
     const { rows, changes, stats } = planSync({
       columns,
@@ -100,6 +114,8 @@ async function execute({ db, config, trigger, fetchImpl }) {
       apiBase: client.base,
       leadsInCrm: leads.length,
       columns: headerFor(columns).length,
+      columnNames: columns.slice(0, 12).map(column => column.label),
+      rebaselined: Boolean(existing.relabelled),
       changesRecorded: changes.length,
       durationMs: Date.now() - startedAt.getTime(),
       ...stats

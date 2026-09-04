@@ -52,6 +52,20 @@ export class Database {
 
     if (!rows.length) return { baseline: true, byId: new Map(), order: [] };
 
+    // The stored rows may predate a change in how columns are named. Comparing
+    // new labels against old ones finds nothing in common, every row looks
+    // changed, and one sync would record thousands of changes and try to
+    // notify on all of them. Treat that as a fresh baseline instead.
+    const storedKeys = new Set(Object.keys(rows[0].fields ?? {}));
+    const overlap = columns.filter(column => storedKeys.has(column.label)).length;
+
+    if (storedKeys.size && overlap < Math.max(1, Math.ceil(columns.length * 0.25))) {
+      return {
+        baseline: true, byId: new Map(), order: [],
+        relabelled: { storedColumns: storedKeys.size, newColumns: columns.length, overlap }
+      };
+    }
+
     const byId = new Map();
     const order = [];
 
