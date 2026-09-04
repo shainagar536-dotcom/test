@@ -55,6 +55,22 @@ function optional(name, fallback) {
   return value === undefined || value === '' ? fallback : value;
 }
 
+/**
+ * Reads a setting whose value is meant to span lines.
+ *
+ * A .env file is one line per value, and Render's single-line fields are the
+ * same, so a message body has to be written with a literal backslash-n. This
+ * turns that into a real newline. A value that already contains real newlines
+ * — Render's multi-line editor, or a here-doc — passes through unharmed.
+ *
+ * @param {string} name
+ * @param {string} fallback
+ * @returns {string}
+ */
+function multiline(name, fallback) {
+  return optional(name, fallback).replace(/\\n/g, '\n');
+}
+
 function number(name, fallback) {
   const value = optional(name, null);
   if (value === null) return fallback;
@@ -123,6 +139,37 @@ export function loadConfig() {
       // Refuse to act on a read that returned fewer leads than this fraction
       // of what is already stored — see sync/run.js.
       shrinkGuard: number('SHRINK_GUARD', 0.5)
+    },
+
+    messaging: {
+      // Which mirrored columns carry the meaning the outbox needs. These are
+      // the CRM's own field labels, so /api/leads shows the exact spellings.
+      columns: {
+        status: optional('STATUS_COLUMN', 'סטטוס'),
+        source: optional('SOURCE_COLUMN', 'מקור מפנה'),
+        clientName: optional('CLIENT_NAME_COLUMN', 'שם הלקוח'),
+        leadNumber: optional('LEAD_NUMBER_COLUMN', 'מספר ליד')
+      },
+
+      subject: multiline('MESSAGE_SUBJECT', 'עדכון סטטוס ליד — {client}'),
+
+      body: multiline('MESSAGE_BODY', [
+        'שלום {source},',
+        '',
+        'עדכון בליד שהפנית:',
+        '',
+        'לקוח: {client}',
+        'מספר מזהה: {leadNumber}',
+        'סטטוס: {message}',
+        '',
+        '{signature}'
+      ].join('\n')),
+
+      signature: multiline('MESSAGE_SIGNATURE', 'בברכה,'),
+
+      // The flood brake. A bulk status edit in the CRM would otherwise fire
+      // one real message per lead, and none of them can be recalled.
+      maxPerRun: number('MAX_SENDS_PER_RUN', 25)
     }
   };
 }

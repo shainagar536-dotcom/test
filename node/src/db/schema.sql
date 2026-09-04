@@ -98,3 +98,31 @@ CREATE TABLE IF NOT EXISTS cursors (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     note       TEXT        NOT NULL DEFAULT ''
 );
+
+-- Status -> message. This is the whole policy surface for what gets sent.
+--
+-- It lives in the database, not in code, so wording can be corrected and new
+-- statuses added without a deploy. A status with no row here sends nothing:
+-- the allowlist is closed by design, which is what keeps the statuses that
+-- have not been given wording yet silent instead of sending something wrong.
+CREATE TABLE IF NOT EXISTS templates (
+    status     TEXT PRIMARY KEY,
+    message    TEXT        NOT NULL,
+    channel    TEXT        NOT NULL DEFAULT 'email',
+    active     BOOLEAN     NOT NULL DEFAULT true,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Who a lead's referring source actually is, and how to reach them.
+--
+-- source_key is the normalized form of source_name. Matching on the raw CRM
+-- string is the number one failure mode: a doubled space or a typographic
+-- quote and the row is never found.
+CREATE TABLE IF NOT EXISTS recipients (
+    source_key  TEXT PRIMARY KEY,
+    source_name TEXT        NOT NULL,
+    email       TEXT        NOT NULL DEFAULT '',
+    whatsapp    TEXT        NOT NULL DEFAULT '',
+    active      BOOLEAN     NOT NULL DEFAULT true,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

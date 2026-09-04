@@ -10,6 +10,8 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { runSync, syncInProgress } from '../sync/run.js';
+import { buildOutbox, summarizeSkips } from '../notify/outbox.js';
+import { normalizeText } from '../mirror.js';
 
 /**
  * Compares two secrets without leaking their contents through timing.
@@ -205,6 +207,111 @@ export function createApi({ db, config }) {
       claimed: claimed.length,
       claimedIds: claimed,
       alreadyClaimed: ids.filter(id => !claimed.includes(id))
+    };
+  });
+
+  // ---------------------------------------------------------------- outbox
+  // What should go out right now: each pending status change matched to its
+  // template and its recipient, with the message already rendered. The
+  // scheduled sender calls this, sends what it gets, and reports back.
+  route('GET', /^\/api\/outbox$/, async (_request, _params, url) => {
+    const limit = Number(url.searchParams.get('limit') ?? 500);
+
+    const changes = await db.listChanges({ pendingOnly: true, limit });
+
+    const templates = new Map((await db.listTemplates())
+      .map(template => [normalizeText(template.status), template]));
+
+    const recipients = new Map((await db.listRecipients())
+      .map(recipient => [recipient.source_key, recipient]));
+
+    // An override for the one run after a bulk edit has been reviewed.
+    const override = Number(url.searchParams.get('maxPerRun'));
+
+    const messaging = Number.isFinite(override) && override > 0
+      ? { ...config.messaging, maxPerRun: override }
+      : config.messaging;
+
+    const { ready, skipped, floodBrake } = buildOutbox({
+      changes, templates, recipients, columns: config.messaging.columns, messaging
+    });
+
+    return {
+      pendingChanges: changes.length,
+      readyToSend: ready.length,
+      floodBrake,
+      skipped: summarizeSkips(skipped),
+      messages: ready
+    };
+  });
+
+  // ------------------------------------------------------------- templates
+  route('GET', /^\/api\/templates$/, async () =>
+    ({ templates: await db.listTemplates() }));
+
+  route('PUT', /^\/api\/templates$/, async request => {
+    const body = await readJsonBody(request);
+    const list = Array.isArray(body) ? body : [body];
+
+    const invalid = list.find(item => !item?.status || !item?.message);
+    if (invalid) {
+      return { status: 400,
+        body: { error: 'Each template needs {status, message}.' } };
+    }
+
+    const saved = [];
+    for (const item of list) saved.push(await db.saveTemplate(item));
+
+    return { saved: saved.length, templates: saved };
+  });
+
+  route('DELETE', /^\/api\/templates\/(.+)$/, async (_request, params) => {
+    const removed = await db.deleteTemplate(decodeURIComponent(params[0]));
+    return removed ? { deleted: true } : { status: 404, body: { error: 'No such template.' } };
+  });
+
+  // ------------------------------------------------------------ recipients
+  route('GET', /^\/api\/recipients$/, async () =>
+    ({ recipients: await db.listRecipients() }));
+
+  route('PUT', /^\/api\/recipients$/, async request => {
+    const body = await readJsonBody(request);
+    const list = Array.isArray(body) ? body : [body];
+
+    const invalid = list.find(item => !item?.sourceName);
+    if (invalid) {
+      return { status: 400,
+        body: { error: 'Each recipient needs {sourceName, email}.' } };
+    }
+
+    const saved = [];
+
+    for (const item of list) {
+      // The key is derived here, never taken from the caller: it has to match
+      // exactly how a CRM source name is normalized at send time.
+      saved.push(await db.saveRecipient({
+        ...item, sourceKey: normalizeText(item.sourceName)
+      }));
+    }
+
+    return { saved: saved.length, recipients: saved };
+  });
+
+  route('DELETE', /^\/api\/recipients\/(.+)$/, async (_request, params) => {
+    const removed = await db.deleteRecipient(normalizeText(decodeURIComponent(params[0])));
+    return removed ? { deleted: true } : { status: 404, body: { error: 'No such recipient.' } };
+  });
+
+  // Every source the stored leads actually use, busiest first, flagged for
+  // whether it has an address yet. This is the worklist for filling the
+  // recipients table — the sources covering the most leads are worth doing.
+  route('GET', /^\/api\/sources$/, async () => {
+    const sources = await db.listSourcesInUse(config.messaging.columns.source);
+
+    return {
+      total: sources.length,
+      withRecipient: sources.filter(source => source.has_recipient).length,
+      sources
     };
   });
 

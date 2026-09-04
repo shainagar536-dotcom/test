@@ -13,11 +13,18 @@ import { loadConfig, isWithinSchedule } from './config.js';
 import { Database } from './db/index.js';
 import { createApi } from './api/server.js';
 import { runSync } from './sync/run.js';
+import { SEED_TEMPLATES } from './notify/seeds.js';
 
 const config = loadConfig();
 const db = new Database(config.database);
 
 await db.migrate();
+
+// Only ever writes into an empty table, so wording edited through the API is
+// never overwritten by a later deploy.
+const seeded = await db.seedTemplates(SEED_TEMPLATES);
+if (seeded) console.log(`Seeded ${seeded} status templates.`);
+
 console.log('Database ready.');
 
 const server = createApi({ db, config });

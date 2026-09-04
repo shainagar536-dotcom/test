@@ -342,6 +342,120 @@ export class Database {
     return rows[0] ?? null;
   }
 
+  // ------------------------------------------------------------ templates
+  /** @returns {Promise<Array<object>>} */
+  async listTemplates() {
+    const { rows } = await this.pool.query(
+      'SELECT status, message, channel, active, updated_at FROM templates ORDER BY status');
+
+    return rows;
+  }
+
+  /**
+   * Adds or replaces one status template.
+   *
+   * @param {{status: string, message: string, channel?: string, active?: boolean}} template
+   */
+  async saveTemplate({ status, message, channel = 'email', active = true }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO templates (status, message, channel, active)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (status) DO UPDATE
+         SET message = EXCLUDED.message, channel = EXCLUDED.channel,
+             active = EXCLUDED.active, updated_at = now()
+       RETURNING status, message, channel, active`,
+      [status, message, channel, active]);
+
+    return rows[0];
+  }
+
+  /** @param {string} status */
+  async deleteTemplate(status) {
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM templates WHERE status = $1', [status]);
+
+    return rowCount > 0;
+  }
+
+  /**
+   * Writes the starting set of templates, but only into an empty table.
+   *
+   * Seeding is deliberately not an upsert: once someone has edited the
+   * wording, a later deploy must not quietly put the original text back.
+   *
+   * @param {Array<object>} templates
+   * @returns {Promise<number>} how many were written
+   */
+  async seedTemplates(templates) {
+    const { rows } = await this.pool.query('SELECT count(*)::int AS n FROM templates');
+    if (rows[0].n > 0) return 0;
+
+    for (const template of templates) await this.saveTemplate(template);
+
+    return templates.length;
+  }
+
+  // ----------------------------------------------------------- recipients
+  /** @returns {Promise<Array<object>>} */
+  async listRecipients() {
+    const { rows } = await this.pool.query(
+      `SELECT source_key, source_name, email, whatsapp, active, updated_at
+         FROM recipients ORDER BY source_name`);
+
+    return rows;
+  }
+
+  /**
+   * @param {{sourceKey: string, sourceName: string, email?: string,
+   *          whatsapp?: string, active?: boolean}} recipient
+   */
+  async saveRecipient({ sourceKey, sourceName, email = '', whatsapp = '', active = true }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO recipients (source_key, source_name, email, whatsapp, active)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (source_key) DO UPDATE
+         SET source_name = EXCLUDED.source_name, email = EXCLUDED.email,
+             whatsapp = EXCLUDED.whatsapp, active = EXCLUDED.active,
+             updated_at = now()
+       RETURNING source_key, source_name, email, whatsapp, active`,
+      [sourceKey, sourceName, email, whatsapp, active]);
+
+    return rows[0];
+  }
+
+  /** @param {string} sourceKey */
+  async deleteRecipient(sourceKey) {
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM recipients WHERE source_key = $1', [sourceKey]);
+
+    return rowCount > 0;
+  }
+
+  /**
+   * Every distinct source name the stored leads carry, with how many leads
+   * each covers and whether it already has a recipient row.
+   *
+   * This is what turns filling in the recipients table from guesswork into a
+   * worklist: the busiest unmatched sources are the ones worth an address.
+   *
+   * @param {string} sourceColumn
+   * @returns {Promise<Array<object>>}
+   */
+  async listSourcesInUse(sourceColumn) {
+    const { rows } = await this.pool.query(
+      `SELECT l.fields ->> $1 AS source_name, count(*)::int AS leads,
+              bool_or(r.source_key IS NOT NULL) AS has_recipient
+         FROM leads l
+         LEFT JOIN recipients r
+           ON r.source_name = l.fields ->> $1
+        WHERE coalesce(l.fields ->> $1, '') <> ''
+        GROUP BY 1
+        ORDER BY 2 DESC`,
+      [sourceColumn]);
+
+    return rows;
+  }
+
   /**
    * Stores a webhook delivery exactly as received.
    *

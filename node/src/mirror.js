@@ -146,6 +146,30 @@ export function stripQuote(value) {
 }
 
 /**
+ * Normalizes a string for comparison.
+ *
+ * Matching CRM text against a stored table is the number one failure mode in
+ * this system: a doubled space, a typographic quote, or an invisible
+ * direction mark left over from a copy-paste is enough to lose the match and
+ * silently drop a notification. Both sides of every comparison go through
+ * this.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function normalizeText(value) {
+  if (value === null || value === undefined) return '';
+
+  return String(value)
+    .replace(/[\u2018\u2019\u05F3\u02BC]/g, "'")     // curly and Hebrew geresh
+    .replace(/[\u201C\u201D\u05F4]/g, '"')            // curly and Hebrew gershayim
+    .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF]/g, '')  // zero-width and bidi marks
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
  * Puts the lead id first, adding it when the CRM schema does not list it.
  *
  * @param {Array<{key: string, label: string}>} columns

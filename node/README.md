@@ -39,6 +39,8 @@ POST /webhook/:source ───┘              │                          │
 | `cursors` | איפה כל צרכן הפסיק לקרוא |
 | `sync_runs` | כל ריצה וכל כישלון, עם הסיבה |
 | `webhook_events` | דחיפות שהתקבלו, כמו שהן |
+| `templates` | סטטוס ← נוסח ההודעה. אתה עורך דרך ה-API, בלי deploy |
+| `recipients` | מקור מפנה ← מייל/וואטספ |
 
 עמודת `changed_at` ב-`leads` היא **מתי השורה באמת השתנתה**, לא מתי הסנכרון רץ. שורה שלא זזה שומרת את החותמת הישנה.
 
@@ -93,6 +95,101 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `GET` | `/api/runs` | היסטוריית ריצות |
 | `POST` | `/webhook/:source` | קולט דחיפה (דורש `WEBHOOK_SECRET`) |
 | `GET` | `/api/webhooks` | דחיפות שהתקבלו |
+| `GET` | `/api/outbox` | **מה לשלוח עכשיו** — מורכב ומוכן. `?maxPerRun=` לעקיפת הבלם |
+| `GET`/`PUT` | `/api/templates` | סטטוס ← נוסח |
+| `DELETE` | `/api/templates/:status` | מחיקת נוסח |
+| `GET`/`PUT` | `/api/recipients` | מקור ← מייל |
+| `DELETE` | `/api/recipients/:source` | מחיקת נמען |
+| `GET` | `/api/sources` | כל המקורות בשימוש, מהעמוס לדל, עם דגל כיסוי |
+
+---
+
+## שכבת ההודעות — מה נשלח ולמי
+
+השרת לא שולח כלום. הוא **מחליט** ומגיש החלטה מוכנה; הקוד המתוזמן שלך שולח. זה מה שמאפשר לבדוק את כל ההיגיון בלי שרת דואר, ומה שהופך הרצה יבשה לאותו מסלול קוד בדיוק.
+
+### שתי טבלאות שאתה שולט בהן דרך ה-API
+
+**`templates`** — סטטוס ← נוסח. שמונת הסטטוסים שהמסמך שלך נותן להם נוסח נזרעים אוטומטית בהפעלה הראשונה. **סטטוס בלי שורה כאן לא שולח כלום** — הרשימה סגורה, וזה מה שמשאיר את 34 הסטטוסים שטרם הוגדרו שקטים במקום לנחש.
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '[{"status":"נסגר","message":"הטיפול בליד הסתיים"}]' $URL/api/templates
+```
+
+הזריעה רצה **רק על טבלה ריקה**. אחרי שתערוך נוסח, deploy הבא לא יחזיר את המקורי.
+
+**`recipients`** — מקור מפנה ← מייל. המפתח נגזר מנרמול השם, לא מתקבל מהקורא, כדי שיתאים בדיוק לאיך ששם מקור מנורמל בזמן השליחה.
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '[{"sourceName":"מטאור - אריאל יואב דביר","email":"ariel@example.com"}]' \
+  $URL/api/recipients
+```
+
+### מאיפה מתחילים למלא
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" $URL/api/sources
+```
+
+מחזיר כל מקור שהלידים באמת משתמשים בו, **מהעמוס לדל**, עם דגל אם כבר יש לו כתובת. זה הופך את מילוי הטבלה מניחוש לרשימת עבודה.
+
+### ה-outbox — מה שהקוד המתוזמן קורא
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" $URL/api/outbox
+```
+
+```json
+{
+  "pendingChanges": 47,
+  "readyToSend": 3,
+  "floodBrake": null,
+  "skipped": {
+    "no-template":            { "count": 31, "examples": [] },
+    "source-not-in-recipients": { "count": 13, "examples": ["קמפיין", "חבר מביא חבר"] }
+  },
+  "messages": [
+    {
+      "changeId": 812,
+      "to": "ariel@example.com",
+      "subject": "עדכון סטטוס ליד — דנה כהן",
+      "body": "שלום אריאל,\n\nעדכון בליד שהפנית:\n\nלקוח: דנה כהן\n...",
+      "status": "לא עונה 3",
+      "statusBefore": "לא עונה 2"
+    }
+  ]
+}
+```
+
+ההודעה כבר מורכבת. הקוד שלך שולח אותה, ואז:
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"ids":[812],"via":"email"}' $URL/api/changes/notified
+```
+
+`skipped` מקובץ לפי סיבה ולא שורה-לכל-דילוג — 31 סטטוסים בלי נוסח זו שורה אחת, לא 31.
+
+### בלם ההצפה
+
+יותר מ-`MAX_SENDS_PER_RUN` הודעות בריצה אחת, וה-outbox מחזיר **`messages: []`** ומסביר למה:
+
+```json
+{ "readyToSend": 0,
+  "floodBrake": { "blocked": 212, "limit": 25, "statuses": ["לא עונה זמן רב"] } }
+```
+
+עדכון סטטוס המוני ב-CRM היה משגר 212 הודעות ללקוחות אמיתיים תוך דקה, ואי אפשר לבטל אף אחת. אחרי שבדקת ואתה רוצה לשחרר בכל זאת:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$URL/api/outbox?maxPerRun=300"
+```
+
+### הרצה יבשה
+
+`GET /api/outbox` **הוא** ההרצה היבשה — הוא לא שולח, רק מראה. תריץ אותו, תסתכל על `messages`, ורק כשהנוסח נראה נכון תחבר את השליחה.
 
 ---
 
@@ -175,9 +272,11 @@ createdb surense_test
 TEST_DATABASE_URL=postgresql://localhost/surense_test npm test
 ```
 
-**21 בדיקות אינטגרציה** מול Postgres אמיתי — רק ה-CRM מדומה. מסד הנתונים, הסנכרון, שרת ה-HTTP והניתוב הם האמיתיים, אז מה שעובר כאן הוא מה שרץ ב-Render.
+**42 בדיקות אינטגרציה** מול Postgres אמיתי — רק ה-CRM מדומה. מסד הנתונים, הסנכרון, שרת ה-HTTP והניתוב הם האמיתיים, אז מה שעובר כאן הוא מה שרץ ב-Render.
 
-מכוסים: ריצת בסיס, זיהוי שינוי ברמת השדה, שימור חותמות, ליד חדש, ליד שנעלם (וסימון שלא חוזר על עצמו), שלושת מקרי הסירוב, אימות ב-API, תפיסת שינויים פעם אחת בלבד, cursor שלא זז אחורה, דפדוף ב-`sinceId`, וקליטת webhook.
+מכוסים: ריצת בסיס, זיהוי שינוי ברמת השדה, שימור חותמות, ליד חדש, ליד שנעלם (וסימון שלא חוזר על עצמו), שלושת מקרי הסירוב, אימות ב-API, תפיסת שינויים פעם אחת בלבד, cursor שלא זז אחורה, דפדוף ב-`sinceId`, קליטת webhook, הרשימה הסגורה של הנוסחים, נרמול שמות מקורות, בלם ההצפה על שני צדי הגבול, וזריעה שלא דורסת עריכות.
+
+> הבדיקות רצות טורית (`--test-concurrency=1`). שני קבצי הבדיקה מנקים את אותן טבלאות, ובמקביל הם מוחקים אחד לשני את הנתונים באמצע הריצה.
 
 ### שני באגים שהבדיקות תפסו
 
