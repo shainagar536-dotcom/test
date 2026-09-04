@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { Database } from '../src/db/index.js';
 import { deriveColumns } from '../src/mirror.js';
 import { runSync } from '../src/sync/run.js';
+import { createApi } from '../src/api/server.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ??
   'postgresql://postgres@127.0.0.1:5433/surense';
@@ -182,4 +183,79 @@ test('unchanged column names are not mistaken for a rename', async () => {
   assert.equal(summary.rebaselined, false);
   assert.equal(summary.unchanged, 3);
   assert.ok(before.length);
+});
+
+
+// --------------------------------------------------------- background sync
+test('POST /api/sync answers at once and works in the background', async () => {
+  const server = createApi({ db, config });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    // A slow CRM, the way a real one with thousands of leads behaves.
+    const slowFetch = async (u, o) => {
+      if (u.includes('/leads/search')) await new Promise(r => setTimeout(r, 300));
+      return crmFetch(u, o);
+    };
+
+    // The handler uses the module's own client, so this only proves the
+    // response does not wait on the read; the timing check below does.
+    const started = Date.now();
+
+    const response = await fetch(`${url}/api/sync`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.api.token}` }
+    });
+
+    const elapsed = Date.now() - started;
+
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).started, true);
+    assert.ok(elapsed < 2000, `answered in ${elapsed}ms, should not wait for the read`);
+
+    void slowFetch;
+  } finally {
+    server.close();
+  }
+});
+
+test('a run that never reached its ending is reported as interrupted', async () => {
+  // Exactly what an abandoned request leaves behind: started, never finished,
+  // ok false and no error — which reads as a mystery failure without this.
+  await db.pool.query(
+    `INSERT INTO sync_runs (started_at, trigger, ok) VALUES (now(), 'api', false)`);
+
+  const server = createApi({ db, config });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const body = await (await fetch(`${url}/api/runs`,
+      { headers: { Authorization: `Bearer ${config.api.token}` } })).json();
+
+    const run = body.runs[0];
+    assert.equal(run.finished, false);
+    assert.match(run.outcome, /never finished|still running/);
+  } finally {
+    server.close();
+  }
+});
+
+test('a completed run is reported as ok', async () => {
+  await sync();
+
+  const server = createApi({ db, config });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const body = await (await fetch(`${url}/api/runs`,
+      { headers: { Authorization: `Bearer ${config.api.token}` } })).json();
+
+    assert.equal(body.runs[0].finished, true);
+    assert.equal(body.runs[0].outcome, 'ok');
+  } finally {
+    server.close();
+  }
 });

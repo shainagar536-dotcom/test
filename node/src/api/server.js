@@ -532,13 +532,56 @@ export function createApi({ db, config }) {
   // ------------------------------------------------------------------ sync
   // Called by whatever schedules the work. On Render's free tier the service
   // sleeps, so an external caller hitting this both wakes it and runs the sync.
-  route('POST', /^\/api\/sync$/, async () => {
-    const summary = await runSync({ db, config, trigger: 'api' });
-    return summary;
+  //
+  // Answers immediately and works in the background. A full read of a few
+  // thousand leads takes about a minute, and holding an HTTP request open
+  // that long fails everywhere it matters — a shell client gives up, the
+  // platform cuts the connection, an external scheduler times out — and the
+  // run is then abandoned half-done with nothing recorded about why.
+  //
+  // ?wait=true keeps the old behaviour for a caller that can afford to hold.
+  route('POST', /^\/api\/sync$/, async (_request, _params, url) => {
+    if (url.searchParams.get('wait') === 'true') {
+      return runSync({ db, config, trigger: 'api-wait' });
+    }
+
+    const started = new Date().toISOString();
+
+    // Deliberately not awaited. The rejection is handled here so a failure
+    // becomes a logged, recorded run rather than an unhandled rejection.
+    runSync({ db, config, trigger: 'api' })
+      .then(summary => console.log('Sync finished:', JSON.stringify(summary)))
+      .catch(error => console.error('Sync failed:', error.message));
+
+    return {
+      status: 202,
+      body: {
+        started: true,
+        at: started,
+        note: 'Running in the background — a full read takes about a minute. ' +
+          'Poll GET /api/runs for the result, or use ?wait=true to hold.'
+      }
+    };
   });
 
-  route('GET', /^\/api\/runs$/, async (_request, _params, url) =>
-    ({ runs: await db.recentRuns(Number(url.searchParams.get('limit') ?? 20)) }));
+  route('GET', /^\/api\/runs$/, async (_request, _params, url) => {
+    const runs = await db.recentRuns(Number(url.searchParams.get('limit') ?? 20));
+
+    return {
+      running: syncInProgress(),
+      runs: runs.map(run => ({
+        ...run,
+        // A row with ok=false and no error is a run that never reached its
+        // own ending — the process restarted, or the request was abandoned
+        // mid-flight. That is a different thing from a run that failed, and
+        // reads as a mystery without saying so.
+        finished: run.finished_at !== null,
+        outcome: run.finished_at === null
+          ? (syncInProgress() ? 'still running' : 'never finished — interrupted')
+          : (run.ok ? 'ok' : 'failed')
+      }))
+    };
+  });
 
   // --------------------------------------------------------------- webhook
   // Surense delivers through Svix, which signs the body instead of sending a
