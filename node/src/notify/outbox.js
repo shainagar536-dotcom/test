@@ -14,6 +14,7 @@ export const SKIP = {
   noTemplate: 'no-template',
   templateOff: 'template-inactive',
   noSource: 'lead-has-no-source',
+  unmappedSource: 'source-id-not-mapped',
   noRecipient: 'source-not-in-recipients',
   recipientOff: 'recipient-inactive',
   noAddress: 'recipient-has-no-address'
@@ -39,6 +40,14 @@ export function render(text, values) {
   });
 }
 
+/** A UUID, as the CRM's id fields hold — never a name anyone typed. */
+const ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** @param {string} value */
+function looksLikeId(value) {
+  return ID_SHAPE.test(value.trim());
+}
+
 /**
  * Decides what should go out for a set of pending changes.
  *
@@ -46,11 +55,14 @@ export function render(text, values) {
  * @param {Array<object>} input.changes      Rows from listChanges, with .fields.
  * @param {Map<string, object>} input.templates   Keyed by normalized status.
  * @param {Map<string, object>} input.recipients  Keyed by normalized source.
+ * @param {Map<string, string>} [input.sourceNames] CRM source id -> name.
  * @param {object} input.columns             {status, source, clientName, leadNumber}
  * @param {object} input.messaging           {subject, body, signature, maxPerRun}
  * @returns {{ready: Array<object>, skipped: Array<object>, floodBrake: ?object}}
  */
-export function buildOutbox({ changes, templates, recipients, columns, messaging }) {
+export function buildOutbox({
+  changes, templates, recipients, columns, messaging, sourceNames = new Map()
+}) {
   const ready = [];
   const skipped = [];
 
@@ -78,8 +90,24 @@ export function buildOutbox({ changes, templates, recipients, columns, messaging
     if (!template) { skip(SKIP.noTemplate); continue; }
     if (!template.active) { skip(SKIP.templateOff); continue; }
 
-    const sourceName = fields[columns.source] ?? '';
-    if (!sourceName) { skip(SKIP.noSource); continue; }
+    const rawSource = String(fields[columns.source] ?? '');
+    if (!rawSource) { skip(SKIP.noSource); continue; }
+
+    // The source column may carry an id rather than a name: a Surense lead
+    // holds sourceId — a UUID — and no source name at all, while the
+    // recipients file is keyed by the partner's name. The mapping table is
+    // what joins the two.
+    const mapped = sourceNames.get(rawSource);
+    const sourceName = mapped ?? rawSource;
+
+    // An unmapped id is reported as its own reason rather than falling
+    // through to "not in recipients". A UUID will never be in the recipients
+    // file, and the fix is to fill in the mapping, not to add a row keyed by
+    // a UUID that nobody can read.
+    if (mapped === undefined && looksLikeId(rawSource)) {
+      skip(SKIP.unmappedSource, rawSource);
+      continue;
+    }
 
     const recipient = recipients.get(normalizeText(sourceName));
 

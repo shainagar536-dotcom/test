@@ -241,6 +241,8 @@ export function createApi({ db, config }) {
     const recipients = new Map((await db.listRecipients())
       .map(recipient => [recipient.source_key, recipient]));
 
+    const sourceNames = await db.sourceNameMap();
+
     // An override for the one run after a bulk edit has been reviewed.
     const override = Number(url.searchParams.get('maxPerRun'));
 
@@ -249,7 +251,8 @@ export function createApi({ db, config }) {
       : config.messaging;
 
     const { ready, skipped, floodBrake } = buildOutbox({
-      changes, templates, recipients, columns: config.messaging.columns, messaging
+      changes, templates, recipients, sourceNames,
+      columns: config.messaging.columns, messaging
     });
 
     return {
@@ -382,8 +385,57 @@ export function createApi({ db, config }) {
     return {
       total: sources.length,
       withRecipient: sources.filter(source => source.has_recipient).length,
+      // Sources still showing as a raw id. Until these are named they can
+      // match no recipient, so this is the first number to drive to zero.
+      unresolvedIds: sources.filter(source => !source.resolved).length,
       sources
     };
+  });
+
+  // ----------------------------------------------------------- source names
+  // The id -> name mapping. Surense's lead fields carry sourceId and no
+  // source name, so without a row here a lead's source is a UUID that matches
+  // nothing in the recipients file and no message is ever sent.
+  //
+  // Rows are written from outside — by whatever resolves an id against the
+  // CRM — and cached here, so the lookup costs one call per source rather
+  // than one per lead.
+  route('GET', /^\/api\/source-names$/, async () => {
+    const names = await db.listSourceNames();
+    const sources = await db.listSourcesInUse(config.messaging.columns.source);
+
+    return {
+      total: names.length,
+      // The worklist: ids the leads actually use that are still unnamed,
+      // busiest first. Naming these in order is the shortest route to a
+      // working send path.
+      unresolvedInUse: sources
+        .filter(source => !source.resolved)
+        .slice(0, 50)
+        .map(source => ({ sourceId: source.source_id, leads: source.leads })),
+      sourceNames: names
+    };
+  });
+
+  route('PUT', /^\/api\/source-names$/, async request => {
+    const body = await readJsonBody(request);
+    const list = Array.isArray(body) ? body : [body];
+
+    const invalid = list.find(item => !item?.sourceId || !item?.sourceName);
+    if (invalid) {
+      return { status: 400,
+        body: { error: 'Each entry needs {sourceId, sourceName}.' } };
+    }
+
+    const saved = [];
+    for (const item of list) saved.push(await db.saveSourceName(item));
+
+    return { saved: saved.length, sourceNames: saved };
+  });
+
+  route('DELETE', /^\/api\/source-names\/(.+)$/, async (_request, params) => {
+    const removed = await db.deleteSourceName(decodeURIComponent(params[0]));
+    return removed ? { deleted: true } : { status: 404, body: { error: 'No such source id.' } };
   });
 
   // --------------------------------------------------------------- columns
@@ -481,6 +533,8 @@ export function createApi({ db, config }) {
         leads: await db.countLeads(),
         distinctSources: sources.length,
         sourcesWithRecipient: sources.filter(source => source.has_recipient).length,
+        sourcesStillUnnamedIds: sources.filter(source => !source.resolved).length,
+        sourceNamesMapped: (await db.listSourceNames()).length,
         templates: templates.length,
         activeTemplates: templates.filter(template => template.active).length,
         recipients: recipients.length,
@@ -523,7 +577,10 @@ export function createApi({ db, config }) {
       topSourcesWithoutRecipient: sources
         .filter(source => !source.has_recipient)
         .slice(0, 15)
-        .map(source => ({ source: source.source_name, leads: source.leads })),
+        .map(source => ({
+          source: source.resolved ? source.source_name : `<unnamed id> ${source.source_id}`,
+          leads: source.leads
+        })),
 
       statusTemplates: templates.map(template => template.status)
     };

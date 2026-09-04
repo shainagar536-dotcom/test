@@ -139,3 +139,19 @@ CREATE TABLE IF NOT EXISTS recipients (
     active      BOOLEAN     NOT NULL DEFAULT true,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- A source's id as the CRM stores it, mapped to the name people use for it.
+--
+-- Surense's lead fields carry sourceId — an opaque UUID — and no source name
+-- at all, while the recipients file is keyed by the partner's name. Without
+-- this table the two can never meet: every lead's source would be a UUID that
+-- matches no row in recipients, and nothing would ever be sent.
+--
+-- Rows are filled in from outside, by whatever resolves an id to a name
+-- (a per-source lookup against the CRM), and are then cached here so the
+-- lookup happens once per source rather than once per lead.
+CREATE TABLE IF NOT EXISTS source_names (
+    source_id   TEXT PRIMARY KEY,
+    source_name TEXT        NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

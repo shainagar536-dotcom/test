@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import pg from 'pg';
 
+import { normalizeText } from '../mirror.js';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 // Postgres returns BIGSERIAL as a string to avoid precision loss. These ids
@@ -445,29 +447,92 @@ export class Database {
     return rowCount > 0;
   }
 
+  // --------------------------------------------------------- source names
   /**
-   * Every distinct source name the stored leads carry, with how many leads
-   * each covers and whether it already has a recipient row.
+   * The id -> name mapping, as rows.
+   *
+   * @returns {Promise<Array<object>>}
+   */
+  async listSourceNames() {
+    const { rows } = await this.pool.query(
+      `SELECT source_id, source_name, updated_at
+         FROM source_names ORDER BY source_name`);
+
+    return rows;
+  }
+
+  /**
+   * The same mapping as a lookup, for the send path.
+   *
+   * @returns {Promise<Map<string, string>>}
+   */
+  async sourceNameMap() {
+    const rows = await this.listSourceNames();
+
+    return new Map(rows.map(row => [row.source_id, row.source_name]));
+  }
+
+  /** @param {{sourceId: string, sourceName: string}} entry */
+  async saveSourceName({ sourceId, sourceName }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO source_names (source_id, source_name)
+       VALUES ($1, $2)
+       ON CONFLICT (source_id) DO UPDATE
+         SET source_name = EXCLUDED.source_name, updated_at = now()
+       RETURNING source_id, source_name`,
+      [sourceId, sourceName]);
+
+    return rows[0];
+  }
+
+  /** @param {string} sourceId */
+  async deleteSourceName(sourceId) {
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM source_names WHERE source_id = $1', [sourceId]);
+
+    return rowCount > 0;
+  }
+
+  /**
+   * Every distinct source the stored leads carry, with how many leads each
+   * covers, the name it resolves to, and whether it has a recipient row.
    *
    * This is what turns filling in the recipients table from guesswork into a
    * worklist: the busiest unmatched sources are the ones worth an address.
+   *
+   * The source column may hold an id rather than a name, so each value is put
+   * through the source_names mapping first. Matching to a recipient is then
+   * done on the normalized name here rather than in SQL, because that is
+   * exactly how the send path matches — a join on the raw string would report
+   * a source as covered that a doubled space stops the sender from finding.
    *
    * @param {string} sourceColumn
    * @returns {Promise<Array<object>>}
    */
   async listSourcesInUse(sourceColumn) {
     const { rows } = await this.pool.query(
-      `SELECT l.fields ->> $1 AS source_name, count(*)::int AS leads,
-              bool_or(r.source_key IS NOT NULL) AS has_recipient
+      `SELECT l.fields ->> $1 AS value, count(*)::int AS leads
          FROM leads l
-         LEFT JOIN recipients r
-           ON r.source_name = l.fields ->> $1
         WHERE coalesce(l.fields ->> $1, '') <> ''
         GROUP BY 1
         ORDER BY 2 DESC`,
       [sourceColumn]);
 
-    return rows;
+    const names = await this.sourceNameMap();
+    const recipientKeys = new Set(
+      (await this.listRecipients()).map(recipient => recipient.source_key));
+
+    return rows.map(row => {
+      const mapped = names.get(row.value);
+
+      return {
+        source_id: row.value,
+        source_name: mapped ?? row.value,
+        resolved: mapped !== undefined,
+        leads: row.leads,
+        has_recipient: recipientKeys.has(normalizeText(mapped ?? row.value))
+      };
+    });
   }
 
   /**

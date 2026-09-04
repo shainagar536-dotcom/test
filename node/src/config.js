@@ -172,13 +172,17 @@ export function loadConfig() {
     },
 
     messaging: {
-      // Which mirrored columns carry the meaning the outbox needs. These are
-      // the CRM's own field labels, so /api/leads shows the exact spellings.
+      // Which mirrored columns carry the meaning the outbox needs. A column
+      // is named by the CRM's own field key, which is what /api/columns
+      // lists. The defaults are Surense's keys as its search results carry
+      // them; another CRM will need all four set.
+      //
+      // sourceId is an id, not a name — see the source_names mapping.
       columns: {
-        status: optional('STATUS_COLUMN', 'סטטוס'),
-        source: optional('SOURCE_COLUMN', 'מקור מפנה'),
-        clientName: optional('CLIENT_NAME_COLUMN', 'שם הלקוח'),
-        leadNumber: optional('LEAD_NUMBER_COLUMN', 'מספר ליד')
+        status: optional('STATUS_COLUMN', 'statusName'),
+        source: optional('SOURCE_COLUMN', 'sourceId'),
+        clientName: optional('CLIENT_NAME_COLUMN', 'fullName'),
+        leadNumber: optional('LEAD_NUMBER_COLUMN', 'number')
       },
 
       subject: multiline('MESSAGE_SUBJECT', 'עדכון סטטוס ליד — {client}'),

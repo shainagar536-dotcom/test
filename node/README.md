@@ -72,6 +72,7 @@ POST /webhook/:source ───┘              │                          │
 | `webhook_events` | דחיפות שהתקבלו, כמו שהן |
 | `templates` | סטטוס ← נוסח ההודעה. אתה עורך דרך ה-API, בלי deploy |
 | `recipients` | מקור מפנה ← מייל/וואטספ |
+| `source_names` | `sourceId` של ה-CRM ← שם המקור |
 
 עמודת `changed_at` ב-`leads` היא **מתי השורה באמת השתנתה**, לא מתי הסנכרון רץ. שורה שלא זזה שומרת את החותמת הישנה.
 
@@ -132,6 +133,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `GET`/`PUT` | `/api/recipients` | מקור ← מייל |
 | `DELETE` | `/api/recipients/:source` | מחיקת נמען |
 | `GET` | `/api/sources` | כל המקורות בשימוש, מהעמוס לדל, עם דגל כיסוי |
+| `GET`/`PUT` | `/api/source-names` | `sourceId` ← שם. ה-GET מחזיר גם את המזהים שעדיין בלי שם |
+| `DELETE` | `/api/source-names/:id` | מחיקת מיפוי |
 | `GET` | `/api/columns` | האם ארבעת שמות העמודות נכונים, ומה להשתמש במקומם |
 | `GET` | `/api/diagnostics` | כל מצב המערכת בתשובה אחת, בלי פרטי לקוחות |
 | `POST` | `/api/recipients/import` | יבוא CSV. תצוגה מקדימה כברירת מחדל, `?apply=true` כדי לכתוב |
@@ -209,6 +212,26 @@ curl -H "Authorization: Bearer $TOKEN" $URL/api/sources
 ```
 
 מחזיר כל מקור שהלידים באמת משתמשים בו, **מהעמוס לדל**, עם דגל אם כבר יש לו כתובת. זה הופך את מילוי הטבלה מניחוש לרשימת עבודה.
+
+### המזהה מול השם — למה צריך `source_names`
+
+לליד ב-Surense **אין שם מקור**. מתוך 79 השדות שהוא מחזיר, מה שיש הוא `sourceId` — UUID. קובץ הנמענים לעומת זאת בנוי לפי **שמות** של שותפים. בלי גשר בין השניים אף הודעה לא תישלח אף פעם: המקור של כל ליד הוא UUID שלא תואם לשום שורה ב-`recipients`.
+
+`source_names` הוא הגשר. אתה ממלא אותו מבחוץ — למשל בפנייה ל-CRM לכל `sourceId` — והתוצאה נשמרת, כך שהפנייה עולה **קריאה אחת למקור** ולא קריאה לכל ליד. בפועל: ~160 מזהים מול 3,279 לידים.
+
+```bash
+# מה עוד חסר, מהעמוס לדל
+curl -H "Authorization: Bearer $TOKEN" $URL/api/source-names
+
+# מילוי
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '[{"sourceId":"2f3a9c1e-...","sourceName":"מטאור - אריאל יואב דביר"}]' \
+  $URL/api/source-names
+```
+
+מזהה שאין לו שם **לא נשלח** ומדווח כ-`source-id-not-mapped` — סיבה נפרדת מ-`source-not-in-recipients`. לשתיהן תיקון אחר: אחת דורשת שורה ב-`source_names`, השנייה שורה בקובץ הנמענים, וערבוב ביניהן שולח את מי שממלא אותן לטבלה הלא נכונה.
+
+אם ב-CRM אחר העמודה כבר מכילה שם ולא מזהה — לא צריך למלא כלום. המיפוי נכנס לפעולה רק כשהערך נראה כמו UUID.
 
 ### ה-outbox — מה שהקוד המתוזמן קורא
 

@@ -103,7 +103,7 @@ after(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query('TRUNCATE leads, changes, sync_runs, webhook_events, cursors');
+  await db.pool.query('TRUNCATE leads, changes, sync_runs, webhook_events, source_names, cursors');
   crmLeads = [lead(1), lead(2), lead(3)];
 });
 

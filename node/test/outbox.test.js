@@ -62,7 +62,8 @@ after(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query('TRUNCATE leads, changes, templates, recipients, cursors');
+  await db.pool.query(
+    'TRUNCATE leads, changes, templates, recipients, source_names, cursors');
 });
 
 const call = (path, options = {}) => fetch(`${baseUrl}${path}`, {
@@ -73,6 +74,17 @@ const call = (path, options = {}) => fetch(`${baseUrl}${path}`, {
     ...options.headers
   }
 });
+
+const SOURCE_ID = '2f3a9c1e-4b7d-4a11-9f0c-6d5e8b2a7c34';
+
+/** A stored lead whose source column holds an id, as Surense stores it. */
+const seedLead = (status) => db.pool.query(
+  `INSERT INTO leads (id, fields, hash, changed_at, change_type)
+   VALUES ('ld_1', $1, 'h', now(), 'בסיס')`,
+  [JSON.stringify({
+    [COLUMNS.status]: status, [COLUMNS.source]: SOURCE_ID,
+    [COLUMNS.clientName]: 'דנה כהן', [COLUMNS.leadNumber]: '8801'
+  })]);
 
 /** A change row shaped the way listChanges returns one. */
 const change = (id, status, source = 'מטאור - אריאל יואב דביר', before = 'חדש') => ({
@@ -98,6 +110,134 @@ const templateMap = (list) =>
 const recipientMap = (list) =>
   new Map(list.map(item => [normalizeText(item.source_name),
     { email: '', whatsapp: '', active: true, ...item }]));
+
+// ------------------------------------------------------------ source names
+/** A lead whose source column holds an id, the way Surense stores it. */
+const idChange = (id, status) => {
+  const row = change(id, status);
+  row.fields[COLUMNS.source] = SOURCE_ID;
+
+  return row;
+};
+
+test('an id in the source column is resolved to a name before matching', () => {
+  const { ready, skipped } = buildOutbox({
+    changes: [idChange(1, 'לא ענה')],
+    templates: templateMap([{ status: 'לא ענה', message: 'אין מענה 1' }]),
+    recipients: recipientMap([
+      { source_name: 'מטאור - אריאל יואב דביר', email: 'ariel@example.com' }]),
+    sourceNames: new Map([[SOURCE_ID, 'מטאור - אריאל יואב דביר']]),
+    columns: COLUMNS,
+    messaging: MESSAGING
+  });
+
+  assert.equal(skipped.length, 0);
+  assert.equal(ready.length, 1);
+  assert.equal(ready[0].to, 'ariel@example.com');
+  assert.equal(ready[0].recipient, 'מטאור - אריאל יואב דביר');
+
+  // The message must greet the partner by name; a UUID reaching a real
+  // person's inbox is worse than sending nothing.
+  assert.match(ready[0].body, /שלום מטאור - אריאל יואב דביר,/);
+});
+
+test('an unmapped id is reported as unmapped, not as a missing recipient', () => {
+  // The two have different fixes: one is a row in source_names, the other a
+  // row in the recipients file. Reporting the wrong one sends whoever is
+  // filling these in to the wrong table.
+  const { ready, skipped } = buildOutbox({
+    changes: [idChange(1, 'לא ענה')],
+    templates: templateMap([{ status: 'לא ענה', message: 'אין מענה 1' }]),
+    recipients: recipientMap([
+      { source_name: 'מטאור - אריאל יואב דביר', email: 'ariel@example.com' }]),
+    sourceNames: new Map(),
+    columns: COLUMNS,
+    messaging: MESSAGING
+  });
+
+  assert.equal(ready.length, 0);
+  assert.equal(skipped[0].reason, SKIP.unmappedSource);
+  assert.equal(skipped[0].detail, SOURCE_ID);
+});
+
+test('a source that is already a name needs no mapping', () => {
+  // Not every CRM stores an id here, and the mapping must not become a
+  // second thing to fill in for a column that already reads correctly.
+  const { ready } = buildOutbox({
+    changes: [change(1, 'לא ענה')],
+    templates: templateMap([{ status: 'לא ענה', message: 'אין מענה 1' }]),
+    recipients: recipientMap([
+      { source_name: 'מטאור - אריאל יואב דביר', email: 'ariel@example.com' }]),
+    sourceNames: new Map(),
+    columns: COLUMNS,
+    messaging: MESSAGING
+  });
+
+  assert.equal(ready.length, 1);
+});
+
+test('a mapping is saved, listed and used by the outbox', async () => {
+  await call('/api/source-names', {
+    method: 'PUT',
+    body: JSON.stringify([{ sourceId: SOURCE_ID, sourceName: 'מטאור - אריאל' }])
+  });
+
+  const listed = await (await call('/api/source-names')).json();
+  assert.equal(listed.total, 1);
+  assert.equal(listed.sourceNames[0].source_name, 'מטאור - אריאל');
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({
+    sourceKey: normalizeText('מטאור - אריאל'),
+    sourceName: 'מטאור - אריאל',
+    email: 'ariel@example.com'
+  });
+
+  await seedLead('לא ענה');
+
+  await db.pool.query(
+    `INSERT INTO changes
+       (lead_id, change_type, column_name, before_value, after_value, occurred_at)
+     VALUES ('ld_1', 'עודכן', $1, 'חדש', 'לא ענה', now())`,
+    [COLUMNS.status]);
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 1);
+  assert.equal(outbox.messages[0].recipient, 'מטאור - אריאל');
+});
+
+test('an id nobody has named yet shows up as a worklist entry', async () => {
+  await seedLead('חדש');
+
+  const sources = await (await call('/api/sources')).json();
+  assert.equal(sources.unresolvedIds, 1);
+
+  const names = await (await call('/api/source-names')).json();
+  assert.deepEqual(names.unresolvedInUse, [{ sourceId: SOURCE_ID, leads: 1 }]);
+});
+
+test('a mapping can be removed, and removing an unknown id is a 404', async () => {
+  await call('/api/source-names', {
+    method: 'PUT',
+    body: JSON.stringify({ sourceId: SOURCE_ID, sourceName: 'מטאור' })
+  });
+
+  const removed = await call(`/api/source-names/${SOURCE_ID}`, { method: 'DELETE' });
+  assert.equal(removed.status, 200);
+
+  const again = await call(`/api/source-names/${SOURCE_ID}`, { method: 'DELETE' });
+  assert.equal(again.status, 404);
+});
+
+test('an entry without both halves is refused', async () => {
+  const response = await call('/api/source-names', {
+    method: 'PUT',
+    body: JSON.stringify({ sourceId: SOURCE_ID })
+  });
+
+  assert.equal(response.status, 400);
+});
 
 // ------------------------------------------------------------------ render
 test('a placeholder is filled from the lead fields', () => {

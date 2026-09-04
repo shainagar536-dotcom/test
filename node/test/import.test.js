@@ -44,7 +44,7 @@ before(async () => {
 after(async () => { server?.close(); await db?.close(); });
 
 beforeEach(async () => {
-  await db.pool.query('TRUNCATE leads, changes, templates, recipients, cursors');
+  await db.pool.query('TRUNCATE leads, changes, templates, recipients, source_names, cursors');
 });
 
 const importCsv = (csv, query = '') => fetch(`${baseUrl}/api/recipients/import${query}`, {
