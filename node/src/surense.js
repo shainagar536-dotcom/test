@@ -185,22 +185,63 @@ export class SurenseClient {
    * @returns {Promise<Array<{key: string, label: string}>>}
    */
   async fetchFields() {
+    return toLabelledFields(await this.fetchFieldsRaw());
+  }
+
+  /**
+   * The field definitions exactly as the CRM sends them.
+   *
+   * fetchFields reduces every entry to {key, label} and throws the rest away.
+   * That is all the mirror needs, but it also discards any option list a
+   * picklist field carries — and the source field's option list is precisely
+   * the id -> name mapping that is missing everywhere else. Keeping the raw
+   * form costs nothing: it is the same single request either way.
+   *
+   * @returns {Promise<Array<object>>}
+   */
+  async fetchFieldsRaw() {
     await this.resolveBase();
-    const parsed = await this.request('GET', '/leads/fields');
 
-    return extractRows(parsed)
-      .map(field => {
-        if (typeof field === 'string') return { key: field, label: field };
+    return extractRows(await this.request('GET', '/leads/fields'));
+  }
 
-        const key = field.key ?? field.name ?? field.field ?? field.id;
-        if (!key) return null;
+  /**
+   * Looks for a lookup that lists the referring sources by id and name.
+   *
+   * Which path serves it is genuinely unknown — it is not in the integration
+   * notes and the leads do not hint at it — so rather than hardcode a guess,
+   * every candidate is tried and the caller scores what came back against the
+   * ids the leads actually carry. A catalog that explains 3 sources out of
+   * 161 is the wrong one whatever its shape; one that explains 158 is right
+   * even if it turned up at an unexpected path.
+   *
+   * Every candidate is a GET. Nothing here writes.
+   *
+   * @param {Array<string>} paths
+   * @returns {Promise<Array<{path: string, ok: boolean, payload: ?object,
+   *                          status: number, error: string}>>}
+   */
+  async probeSourceCatalogs(paths) {
+    await this.resolveBase();
 
-        return {
-          key: String(key),
-          label: String(field.label ?? field.title ?? field.displayName ?? key)
-        };
-      })
-      .filter(Boolean);
+    const attempts = [];
+
+    for (const path of paths) {
+      try {
+        const payload = await this.request('GET', path);
+        attempts.push({ path, ok: true, payload, status: 200, error: '' });
+      } catch (error) {
+        attempts.push({
+          path,
+          ok: false,
+          payload: null,
+          status: error.status ?? 0,
+          error: error.message
+        });
+      }
+    }
+
+    return attempts;
   }
 
   /**
@@ -250,6 +291,32 @@ export class SurenseClient {
 
     return { leads, complete: false };
   }
+}
+
+/**
+ * Reduces raw schema entries to the {key, label} pairs the mirror wants.
+ *
+ * Separate from the fetch so that a caller which needs the raw entries — the
+ * source field's option list lives there — can have both from one request.
+ *
+ * @param {Array<object|string>} rows
+ * @returns {Array<{key: string, label: string}>}
+ */
+export function toLabelledFields(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map(field => {
+      if (typeof field === 'string') return { key: field, label: field };
+      if (!field || typeof field !== 'object') return null;
+
+      const key = field.key ?? field.name ?? field.field ?? field.id;
+      if (!key) return null;
+
+      return {
+        key: String(key),
+        label: String(field.label ?? field.title ?? field.displayName ?? key)
+      };
+    })
+    .filter(Boolean);
 }
 
 /**

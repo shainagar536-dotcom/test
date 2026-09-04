@@ -175,11 +175,35 @@ export function loadConfig() {
       // Which mirrored columns carry the meaning the outbox needs. These are
       // the CRM's own field labels, so /api/leads shows the exact spellings.
       columns: {
-        status: optional('STATUS_COLUMN', 'סטטוס'),
-        source: optional('SOURCE_COLUMN', 'מקור מפנה'),
-        clientName: optional('CLIENT_NAME_COLUMN', 'שם הלקוח'),
-        leadNumber: optional('LEAD_NUMBER_COLUMN', 'מספר ליד')
+        status: optional('STATUS_COLUMN', 'statusName'),
+
+        // A source NAME column, if the CRM ever serves one. It does not
+        // today: every other entity arrives as an id/name pair, and the
+        // source is the one that arrives as a bare id. Left configurable so
+        // that a CRM which does serve one needs no code change, and empty by
+        // default so the id lookup below is what actually runs.
+        source: optional('SOURCE_COLUMN', ''),
+
+        // The id the leads really carry, resolved to a name through the
+        // `sources` table. This is the mapping the recipients file is joined
+        // on — see sources.js.
+        sourceId: optional('SOURCE_ID_COLUMN', 'sourceId'),
+
+        clientName: optional('CLIENT_NAME_COLUMN', 'fullName'),
+        leadNumber: optional('LEAD_NUMBER_COLUMN', 'number')
       },
+
+      // Read-only lookups tried when hunting for the source catalog. Order is
+      // most to least likely; each is scored against real lead traffic rather
+      // than trusted for answering at all.
+      sourceCatalogPaths: optional('SOURCE_CATALOG_PATHS', [
+        '/leads/sources',
+        '/sources',
+        '/leadsources',
+        '/lookups/sources',
+        '/settings/sources',
+        '/leads/sources/list'
+      ].join(',')).split(',').map(path => path.trim()).filter(Boolean),
 
       subject: multiline('MESSAGE_SUBJECT', 'עדכון סטטוס ליד — {client}'),
 

@@ -139,3 +139,26 @@ CREATE TABLE IF NOT EXISTS recipients (
     active      BOOLEAN     NOT NULL DEFAULT true,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Referring source id -> name.
+--
+-- The leads carry `sourceId` as a bare UUID and no name anywhere: unlike
+-- every other entity in the CRM, the source arrives without its label. The
+-- recipients table is keyed by the name, because the name is what the
+-- operator's own file lists, so this table is the bridge between them.
+-- Without it every lead skips with "lead-has-no-source".
+--
+-- `origin` records where a name came from, because the two sources of truth
+-- are not equal: a name discovered in the CRM is authoritative and may be
+-- refreshed on every sync, while one entered by hand is the operator's
+-- decision and must survive a sync that would otherwise overwrite it.
+CREATE TABLE IF NOT EXISTS sources (
+    source_id  TEXT PRIMARY KEY,
+    name       TEXT        NOT NULL,
+
+    -- 'crm'    — read from a CRM lookup, refreshed automatically
+    -- 'manual' — supplied through the API, never overwritten by a sync
+    origin     TEXT        NOT NULL DEFAULT 'crm',
+
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

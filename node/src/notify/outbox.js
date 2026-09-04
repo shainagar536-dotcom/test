@@ -8,12 +8,20 @@
  */
 
 import { normalizeText } from '../mirror.js';
+import { resolveSourceName } from '../sources.js';
 
 /** Why a change produced no message. */
 export const SKIP = {
   noTemplate: 'no-template',
   templateOff: 'template-inactive',
   noSource: 'lead-has-no-source',
+
+  // The lead names a source, but no name is known for that id. Distinct from
+  // noSource on purpose: one means the CRM told us nothing, the other means
+  // it told us something we cannot yet read. They need opposite fixes, and
+  // collapsing them hides which one is actually happening.
+  unknownSource: 'source-id-not-mapped',
+
   noRecipient: 'source-not-in-recipients',
   recipientOff: 'recipient-inactive',
   noAddress: 'recipient-has-no-address'
@@ -46,11 +54,14 @@ export function render(text, values) {
  * @param {Array<object>} input.changes      Rows from listChanges, with .fields.
  * @param {Map<string, object>} input.templates   Keyed by normalized status.
  * @param {Map<string, object>} input.recipients  Keyed by normalized source.
- * @param {object} input.columns             {status, source, clientName, leadNumber}
+ * @param {object} input.columns             {status, source, sourceId, clientName, leadNumber}
+ * @param {Map<string, string>} [input.sourceNames]  Source id -> name.
  * @param {object} input.messaging           {subject, body, signature, maxPerRun}
  * @returns {{ready: Array<object>, skipped: Array<object>, floodBrake: ?object}}
  */
-export function buildOutbox({ changes, templates, recipients, columns, messaging }) {
+export function buildOutbox({
+  changes, templates, recipients, columns, messaging, sourceNames = new Map()
+}) {
   const ready = [];
   const skipped = [];
 
@@ -78,8 +89,17 @@ export function buildOutbox({ changes, templates, recipients, columns, messaging
     if (!template) { skip(SKIP.noTemplate); continue; }
     if (!template.active) { skip(SKIP.templateOff); continue; }
 
-    const sourceName = fields[columns.source] ?? '';
-    if (!sourceName) { skip(SKIP.noSource); continue; }
+    // The lead carries `sourceId` and no name, so the name is looked up.
+    // Which of the two failures this is matters: an id with no mapping is a
+    // gap in the source catalog, while no id at all is a lead the CRM never
+    // attributed to anyone.
+    const { name: sourceName, id: sourceId } =
+      resolveSourceName(fields, columns, sourceNames);
+
+    if (!sourceName) {
+      skip(sourceId ? SKIP.unknownSource : SKIP.noSource, sourceId || null);
+      continue;
+    }
 
     const recipient = recipients.get(normalizeText(sourceName));
 

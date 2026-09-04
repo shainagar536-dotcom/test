@@ -15,6 +15,8 @@ import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
 import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
+import { SurenseClient } from '../surense.js';
+import { extractPairs, optionsFromSchema, scoreCatalog } from '../sources.js';
 
 /**
  * Compares two secrets without leaking their contents through timing.
@@ -109,9 +111,10 @@ function presentChange(row) {
  * @param {object} deps
  * @param {import('../db/index.js').Database} deps.db
  * @param {object} deps.config
+ * @param {typeof fetch} [deps.fetchImpl]  Injectable, for tests.
  * @returns {import('node:http').Server}
  */
-export function createApi({ db, config }) {
+export function createApi({ db, config, fetchImpl }) {
   const routes = [];
   const route = (method, pattern, handler, { auth = true } = {}) =>
     routes.push({ method, pattern, handler, auth });
@@ -248,8 +251,11 @@ export function createApi({ db, config }) {
       ? { ...config.messaging, maxPerRun: override }
       : config.messaging;
 
+    const sourceNames = await db.sourceNameMap();
+
     const { ready, skipped, floodBrake } = buildOutbox({
-      changes, templates, recipients, columns: config.messaging.columns, messaging
+      changes, templates, recipients, sourceNames,
+      columns: config.messaging.columns, messaging
     });
 
     return {
@@ -338,23 +344,43 @@ export function createApi({ db, config }) {
     }
 
     const { recipients, rejected, columns } = parsed;
-    const sourcesInUse = await db.listSourcesInUse(config.messaging.columns.source);
+    const sourcesInUse = await db.listSourcesInUse(config.messaging.columns);
     const report = reconcile(recipients, sourcesInUse);
 
     // apply=true is the deliberate second call, after the preview was read.
     const apply = url.searchParams.get('apply') === 'true';
     let saved = 0;
 
+    // A file that carries the source id maps it as well as addresses it.
+    // This is the shortest path out of the id/name gap: the operator already
+    // maintains this sheet, and one extra column makes it the bridge.
+    const mappings = recipients
+      .filter(recipient => recipient.sourceId)
+      .map(recipient => ({ id: recipient.sourceId, name: recipient.sourceName }));
+
+    let mapped = 0;
+
     if (apply) {
       for (const recipient of recipients) {
         await db.saveRecipient(recipient);
         saved++;
+      }
+
+      if (mappings.length) {
+        ({ written: mapped } = await db.upsertSources(mappings, 'manual'));
       }
     }
 
     return {
       applied: apply,
       saved,
+
+      // How many rows carried a source id, and how many were stored. A file
+      // with no id column reports 0 here, which is the signal that the
+      // mapping still has to come from somewhere else.
+      sourceIdsInFile: mappings.length,
+      sourceIdsMapped: mapped,
+
       parsed: recipients.length,
       rejected,
       // Which column of the file was read as what, so a wrong guess is
@@ -377,12 +403,165 @@ export function createApi({ db, config }) {
   // whether it has an address yet. This is the worklist for filling the
   // recipients table — the sources covering the most leads are worth doing.
   route('GET', /^\/api\/sources$/, async () => {
-    const sources = await db.listSourcesInUse(config.messaging.columns.source);
+    const sources = await db.listSourcesInUse(config.messaging.columns);
+    const unresolved = await db.listUnresolvedSources(config.messaging.columns);
 
     return {
       total: sources.length,
       withRecipient: sources.filter(source => source.has_recipient).length,
+
+      // Leads whose source id maps to no name. These cannot reach a
+      // recipient however complete the recipients file is, so they are
+      // reported next to the worklist rather than left out of it.
+      unresolvedIds: unresolved.length,
+      unresolvedLeads: unresolved.reduce((sum, row) => sum + row.leads, 0),
+      unresolved: unresolved.slice(0, 50),
+
       sources
+    };
+  });
+
+  // ---------------------------------------------------------- source map
+  // The id -> name bridge. The leads carry `sourceId` as a bare UUID; the
+  // recipients file is keyed by name. Without a row here the two never join.
+  route('GET', /^\/api\/sources\/map$/, async () => {
+    const map = await db.listSourceMap();
+
+    return {
+      total: map.length,
+      fromCrm: map.filter(row => row.origin === 'crm').length,
+      manual: map.filter(row => row.origin === 'manual').length,
+      sources: map
+    };
+  });
+
+  // Hand-written mappings. These outrank anything a sync discovers, so a name
+  // corrected here is not undone by the next hourly run.
+  route('PUT', /^\/api\/sources\/map$/, async (request) => {
+    const body = await readJsonBody(request);
+    const rows = Array.isArray(body) ? body : [body];
+
+    const pairs = rows
+      .map(row => ({
+        id: String(row.sourceId ?? row.id ?? '').trim(),
+        name: String(row.name ?? row.sourceName ?? '').trim()
+      }))
+      .filter(pair => pair.id && pair.name);
+
+    if (!pairs.length) {
+      return { status: 400, body: {
+        error: 'Send [{"sourceId": "<uuid>", "name": "<source name>"}, ...].' } };
+    }
+
+    const { written } = await db.upsertSources(pairs, 'manual');
+
+    return { written, sources: await db.listSourceMap() };
+  });
+
+  route('DELETE', /^\/api\/sources\/map\/(.+)$/, async (_request, params) => {
+    const removed = await db.deleteSource(decodeURIComponent(params[0]));
+
+    return removed
+      ? { deleted: true }
+      : { status: 404, body: { error: 'No such source id.' } };
+  });
+
+  // Hunts the CRM for a lookup that lists sources by id and name, and scores
+  // each candidate against the ids the leads actually carry.
+  //
+  // Which path serves this — if any does — is not documented, so guessing one
+  // and hardcoding it would be a coin flip that fails silently. Every
+  // candidate is a GET; nothing here writes to the CRM, and nothing is stored
+  // unless ?apply=true and a candidate actually explains the traffic.
+  route('POST', /^\/api\/sources\/probe$/, async (request, _params, url) => {
+    const usage = await db.sourceUsage(config.messaging.columns);
+
+    if (!usage.size) {
+      return { status: 409, body: {
+        error: 'No leads stored yet. Run POST /api/sync first.' } };
+    }
+
+    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const candidates = [];
+
+    // The cheapest candidate first: the field schema is already read on every
+    // sync, so if the source field is a picklist the mapping is arriving
+    // already and is merely being discarded.
+    try {
+      const schema = await client.fetchFieldsRaw();
+      const pairs = optionsFromSchema(schema, config.messaging.columns.sourceId);
+
+      candidates.push({
+        path: 'GET /leads/fields (field schema options)',
+        ok: true,
+        ...scoreCatalog(pairs, usage),
+        pairsFound: pairs
+      });
+    } catch (error) {
+      candidates.push({
+        path: 'GET /leads/fields (field schema options)',
+        ok: false, error: error.message, coverage: 0, pairsFound: []
+      });
+    }
+
+    for (const attempt of await client.probeSourceCatalogs(config.sourceCatalogPaths)) {
+      if (!attempt.ok) {
+        candidates.push({
+          path: `GET ${attempt.path}`,
+          ok: false,
+          status: attempt.status,
+          error: attempt.error,
+          coverage: 0,
+          pairsFound: []
+        });
+        continue;
+      }
+
+      const pairs = extractPairs(attempt.payload);
+
+      candidates.push({
+        path: `GET ${attempt.path}`,
+        ok: true,
+        status: attempt.status,
+        ...scoreCatalog(pairs, usage),
+        pairsFound: pairs
+      });
+    }
+
+    candidates.sort((a, b) => (b.coverage ?? 0) - (a.coverage ?? 0));
+    const best = candidates[0];
+
+    const apply = url.searchParams.get('apply') === 'true';
+    let written = 0;
+
+    // Storing a catalog that explains almost nothing would fill the table
+    // with plausible-looking wrong names, which is worse than an empty table:
+    // an empty one skips, a wrong one emails the wrong partner.
+    const worthStoring = Boolean(best?.ok) && best.matchedSources > 0;
+
+    if (apply && worthStoring) {
+      ({ written } = await db.upsertSources(best.pairsFound, 'crm'));
+    }
+
+    return {
+      applied: apply && worthStoring,
+      written,
+      leadSourceIds: usage.size,
+
+      // Trimmed: a catalog can be long, and the decision is made on the
+      // score, not on reading every pair.
+      candidates: candidates.map(({ pairsFound, ...rest }) => ({
+        ...rest,
+        samplePairs: (pairsFound ?? []).slice(0, 5)
+      })),
+
+      note: worthStoring
+        ? (apply
+          ? undefined
+          : 'Repeat with ?apply=true to store the best candidate.')
+        : 'No candidate resolved any source id the leads use. The CRM may not ' +
+          'expose a source lookup to this client; fill the map by hand with ' +
+          'PUT /api/sources/map, or ask Surense which path serves it.'
     };
   });
 
@@ -449,7 +628,10 @@ export function createApi({ db, config }) {
     const templates = await db.listTemplates();
     const recipients = await db.listRecipients();
     const pending = await db.listChanges({ pendingOnly: true, limit: 1000 });
-    const sources = sample ? await db.listSourcesInUse(config.messaging.columns.source) : [];
+    const sources = sample ? await db.listSourcesInUse(config.messaging.columns) : [];
+    const unresolved = sample
+      ? await db.listUnresolvedSources(config.messaging.columns) : [];
+    const sourceMap = await db.listSourceMap();
 
     const names = sample ? Object.keys(sample.fields) : [];
 
@@ -481,6 +663,15 @@ export function createApi({ db, config }) {
         leads: await db.countLeads(),
         distinctSources: sources.length,
         sourcesWithRecipient: sources.filter(source => source.has_recipient).length,
+
+        // The id -> name bridge. While this is empty every lead skips with
+        // source-id-not-mapped and nothing can ever be sent, however complete
+        // the templates and recipients are — so it belongs in the headline
+        // counts rather than buried.
+        sourceMappings: sourceMap.length,
+        sourceMappingsManual: sourceMap.filter(row => row.origin === 'manual').length,
+        unresolvedSourceIds: unresolved.length,
+        unresolvedLeads: unresolved.reduce((sum, row) => sum + row.leads, 0),
         templates: templates.length,
         activeTemplates: templates.filter(template => template.active).length,
         recipients: recipients.length,

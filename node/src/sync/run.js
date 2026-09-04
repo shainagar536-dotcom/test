@@ -4,8 +4,9 @@
  * The CRM is only ever read. Everything written goes to Postgres.
  */
 
-import { SurenseClient } from '../surense.js';
+import { SurenseClient, toLabelledFields } from '../surense.js';
 import { planSync, readExisting, deriveColumns, headerFor } from '../mirror.js';
+import { optionsFromSchema } from '../sources.js';
 
 /** Runs are serialised in-process; a second caller is told to wait. */
 let inFlight = null;
@@ -43,7 +44,22 @@ async function execute({ db, config, trigger, fetchImpl }) {
 
     // The schema supplies labels only. Which columns exist is decided by the
     // leads themselves — see deriveColumns.
-    const schema = await client.fetchFields().catch(() => []);
+    const rawSchema = await client.fetchFieldsRaw().catch(() => []);
+    const schema = toLabelledFields(rawSchema);
+
+    // If the CRM describes the source field as a picklist, its option list is
+    // the id -> name mapping the leads do not carry. It arrives on a request
+    // that is already being made, so keeping it costs nothing — and it means
+    // a source added in the CRM gets its name here without anyone noticing.
+    const sourceOptions = optionsFromSchema(
+      rawSchema, config.messaging?.columns?.sourceId ?? 'sourceId');
+
+    if (sourceOptions.length) {
+      // 'crm' never overwrites a name entered by hand — see upsertSources.
+      await db.upsertSources(sourceOptions, 'crm').catch(error => {
+        console.warn(`Could not store the source catalog: ${error.message}`);
+      });
+    }
 
     const { leads, complete } = await client.fetchAllLeads();
 

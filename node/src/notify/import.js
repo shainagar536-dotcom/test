@@ -23,7 +23,14 @@ const HEADERS = {
   sourceName: ['מקור', 'שם מקור', 'מקור מפנה', 'source', 'source name', 'name'],
   email: ['מייל', 'אימייל', 'דואל', 'דוא"ל', 'כתובת מייל', 'email', 'e-mail', 'mail'],
   whatsapp: ['וואטספ', 'ואטסאפ', 'whatsapp', 'phone', 'טלפון', 'נייד'],
-  active: ['פעיל', 'active', 'enabled']
+  active: ['פעיל', 'active', 'enabled'],
+
+  // Optional, and the most direct answer to the mapping problem: the leads
+  // carry `sourceId` and no name, so a file that lists the id alongside the
+  // name carries the bridge itself and needs no lookup in the CRM at all.
+  sourceId: [
+    'מזהה מקור', 'מזהה', 'קוד מקור', 'sourceid', 'source id', 'id', 'uuid', 'guid'
+  ]
 };
 
 /**
@@ -76,7 +83,8 @@ export function parseCsv(text) {
  * Works out which column holds what.
  *
  * @param {Array<string>} headers
- * @returns {{sourceName: number, email: number, whatsapp: number, active: number}}
+ * @returns {{sourceName: number, email: number, whatsapp: number,
+ *            active: number, sourceId: number}}
  */
 export function detectColumns(headers) {
   const normalized = headers.map(normalizeText);
@@ -120,6 +128,7 @@ export function buildRecipients(rows) {
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     const sourceName = cell(row, columns.sourceName);
+    const sourceId = cell(row, columns.sourceId);
     const email = cell(row, columns.email);
     const whatsapp = cell(row, columns.whatsapp);
     const activeCell = normalizeText(cell(row, columns.active));
@@ -160,6 +169,10 @@ export function buildRecipients(rows) {
     recipients.push({
       sourceKey: key,
       sourceName,
+      // Empty unless the file carried an id column. When present this is
+      // written to the sources table, which is what lets a lead reach this
+      // row at all.
+      sourceId,
       email,
       whatsapp,
       // Blank counts as active; only an explicit no mutes a source.

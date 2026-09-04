@@ -446,28 +446,155 @@ export class Database {
   }
 
   /**
-   * Every distinct source name the stored leads carry, with how many leads
-   * each covers and whether it already has a recipient row.
+   * Every distinct source NAME the stored leads resolve to, with how many
+   * leads each covers and whether it already has a recipient row.
    *
    * This is what turns filling in the recipients table from guesswork into a
    * worklist: the busiest unmatched sources are the ones worth an address.
    *
-   * @param {string} sourceColumn
+   * A lead reaches a name one of two ways — a name column, if the CRM serves
+   * one, or its `sourceId` through the sources table. This CRM only does the
+   * second, so a lead whose id has no row in `sources` contributes to no name
+   * at all and is reported by listUnresolvedSources instead of silently
+   * vanishing from the worklist.
+   *
+   * @param {{source: string, sourceId: string}} columns
    * @returns {Promise<Array<object>>}
    */
-  async listSourcesInUse(sourceColumn) {
+  async listSourcesInUse(columns) {
+    const { source, sourceId } = sourceColumns(columns);
+
     const { rows } = await this.pool.query(
-      `SELECT l.fields ->> $1 AS source_name, count(*)::int AS leads,
-              bool_or(r.source_key IS NOT NULL) AS has_recipient
+      `SELECT coalesce(NULLIF(l.fields ->> $1, ''), s.name) AS source_name,
+              count(*)::int                                 AS leads,
+              bool_or(r.source_key IS NOT NULL)             AS has_recipient
          FROM leads l
+         LEFT JOIN sources s
+           ON s.source_id = NULLIF(l.fields ->> $2, '')
          LEFT JOIN recipients r
-           ON r.source_name = l.fields ->> $1
+           ON r.source_name = coalesce(NULLIF(l.fields ->> $1, ''), s.name)
+        WHERE coalesce(NULLIF(l.fields ->> $1, ''), s.name) IS NOT NULL
+        GROUP BY 1
+        ORDER BY 2 DESC`,
+      [source, sourceId]);
+
+    return rows;
+  }
+
+  /**
+   * Source ids the leads carry that no name is known for.
+   *
+   * These are the leads that can never produce a message: the id is present,
+   * so the lead is not sourceless, but nothing can be looked up by it. Kept
+   * separate from listSourcesInUse so that "we do not know who this is" never
+   * reads as "this source has no leads".
+   *
+   * @param {{source: string, sourceId: string}} columns
+   * @returns {Promise<Array<{source_id: string, leads: number}>>}
+   */
+  async listUnresolvedSources(columns) {
+    const { source, sourceId } = sourceColumns(columns);
+
+    const { rows } = await this.pool.query(
+      `SELECT l.fields ->> $2 AS source_id, count(*)::int AS leads
+         FROM leads l
+         LEFT JOIN sources s
+           ON s.source_id = NULLIF(l.fields ->> $2, '')
+        WHERE coalesce(l.fields ->> $1, '') = ''
+          AND coalesce(l.fields ->> $2, '') <> ''
+          AND s.source_id IS NULL
+        GROUP BY 1
+        ORDER BY 2 DESC`,
+      [source, sourceId]);
+
+    return rows;
+  }
+
+  /**
+   * How many leads each source id carries, named or not.
+   *
+   * This is the denominator a candidate catalog is scored against — see
+   * scoreCatalog in sources.js.
+   *
+   * @param {{sourceId: string}} columns
+   * @returns {Promise<Map<string, number>>}
+   */
+  async sourceUsage(columns) {
+    const { sourceId } = sourceColumns(columns);
+
+    const { rows } = await this.pool.query(
+      `SELECT l.fields ->> $1 AS source_id, count(*)::int AS leads
+         FROM leads l
         WHERE coalesce(l.fields ->> $1, '') <> ''
         GROUP BY 1
         ORDER BY 2 DESC`,
-      [sourceColumn]);
+      [sourceId]);
+
+    return new Map(rows.map(row => [row.source_id, row.leads]));
+  }
+
+  /**
+   * The whole id -> name map, as the outbox needs it.
+   *
+   * @returns {Promise<Map<string, string>>}
+   */
+  async sourceNameMap() {
+    const { rows } = await this.pool.query('SELECT source_id, name FROM sources');
+
+    return new Map(rows.map(row => [row.source_id, row.name]));
+  }
+
+  /** @returns {Promise<Array<object>>} */
+  async listSourceMap() {
+    const { rows } = await this.pool.query(
+      `SELECT source_id, name, origin, updated_at
+         FROM sources ORDER BY name`);
 
     return rows;
+  }
+
+  /**
+   * Writes id -> name pairs.
+   *
+   * A manual entry outranks the CRM: when a sync rediscovers a name for an id
+   * somebody has already corrected by hand, the hand-written one stands. The
+   * operator fixing a name in the recipients worklist and having the next
+   * hourly sync quietly undo it is the failure this prevents.
+   *
+   * @param {Array<{id: string, name: string}>} pairs
+   * @param {'crm'|'manual'} origin
+   * @returns {Promise<{written: number}>}
+   */
+  async upsertSources(pairs, origin = 'crm') {
+    let written = 0;
+
+    for (const pair of pairs) {
+      const id = String(pair.id ?? '').trim();
+      const name = String(pair.name ?? '').trim();
+      if (!id || !name) continue;
+
+      const { rowCount } = await this.pool.query(
+        `INSERT INTO sources (source_id, name, origin, updated_at)
+              VALUES ($1, $2, $3, now())
+         ON CONFLICT (source_id) DO UPDATE
+                SET name = EXCLUDED.name,
+                    origin = EXCLUDED.origin,
+                    updated_at = now()
+              WHERE sources.origin <> 'manual' OR EXCLUDED.origin = 'manual'`,
+        [id, name, origin]);
+
+      written += rowCount;
+    }
+
+    return { written };
+  }
+
+  /** @param {string} sourceId */
+  async deleteSource(sourceId) {
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM sources WHERE source_id = $1', [sourceId]);
+
+    return rowCount > 0;
   }
 
   /**
@@ -593,6 +720,27 @@ export class Database {
  * @param {string|Date} value
  * @returns {Date|string}
  */
+/**
+ * Normalizes the column argument the source queries take.
+ *
+ * Accepts the plain string these methods used to take, so a caller that only
+ * knows about a source *name* column keeps working, and defaults the id
+ * column to the key this CRM actually uses.
+ *
+ * @param {string|{source?: string, sourceId?: string}} columns
+ * @returns {{source: string, sourceId: string}}
+ */
+function sourceColumns(columns) {
+  if (typeof columns === 'string') {
+    return { source: columns, sourceId: 'sourceId' };
+  }
+
+  return {
+    source: columns?.source ?? '',
+    sourceId: columns?.sourceId ?? 'sourceId'
+  };
+}
+
 function toTimestamp(value) {
   if (value instanceof Date) return value;
 
