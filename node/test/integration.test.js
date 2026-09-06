@@ -48,6 +48,7 @@ const FIELDS = [
 ];
 
 let crmLeads = [];
+let sourcesFail = false;
 
 const lead = (n, status = 'לא ענה') => ({
   id: `ld_${n}`,
@@ -71,6 +72,16 @@ const crmFetch = async (url, options = {}) => {
   }
 
   if (url.includes('/leads/fields')) return jsonResponse({ fields: FIELDS });
+
+  if (url.includes('/customers/sources')) {
+    if (sourcesFail) return jsonResponse({ error: 'missing scope' }, 400);
+
+    // The name is under `title` — the shape a live response really has.
+    return jsonResponse({ results: [
+      { id: 'src_1', title: 'מטאור - אריאל יואב דביר', active: true },
+      { id: 'src_2', title: 'סו"ב רועי כץ', active: false }
+    ] });
+  }
 
   if (url.includes('/leads/search')) {
     const body = JSON.parse(options.body);
@@ -105,6 +116,7 @@ after(async () => {
 beforeEach(async () => {
   await db.pool.query('TRUNCATE leads, changes, sync_runs, webhook_events, source_names, cursors');
   crmLeads = [lead(1), lead(2), lead(3)];
+  sourcesFail = false;
 });
 
 const sync = () => runSync({ db, config, trigger: 'test', fetchImpl: crmFetch });
@@ -245,6 +257,43 @@ test('a failed run is still recorded, with its reason', async () => {
   const runs = await db.recentRuns(1);
   assert.equal(runs[0].ok, false);
   assert.match(runs[0].error, /no leads at all/);
+});
+
+// -------------------------------------------------------------- source names
+test('the sync fills in the source id to name mapping', async () => {
+  const summary = await sync();
+  assert.equal(summary.sourcesMapped, 2);
+
+  const names = await db.sourceNameMap();
+  assert.equal(names.get('src_1'), 'מטאור - אריאל יואב דביר');
+
+  // An inactive source is still mapped. Leads referring to one retired last
+  // year are still in the CRM, and a status change on them must not read as
+  // an unmapped UUID.
+  assert.equal(names.get('src_2'), 'סו"ב רועי כץ');
+});
+
+test('a refused source call leaves the lead sync working', async () => {
+  // This mapping decides who a message is addressed to, not what the mirror
+  // holds. Losing the customers:read scope must not also stop the mirror.
+  sourcesFail = true;
+
+  const summary = await sync();
+
+  assert.equal(summary.ok, true);
+  assert.equal(summary.leadsInCrm, 3);
+  assert.equal(summary.sourcesMapped, 0);
+  assert.match(summary.sourcesError, /400/);
+});
+
+test('a mapping already stored survives a run that could not refresh it', async () => {
+  await sync();
+  sourcesFail = true;
+  await sync();
+
+  const names = await db.sourceNameMap();
+  assert.equal(names.get('src_1'), 'מטאור - אריאל יואב דביר',
+    'the previous mapping must stay in place');
 });
 
 // ------------------------------------------------------------------- the API

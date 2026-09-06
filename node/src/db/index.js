@@ -485,6 +485,44 @@ export class Database {
     return rows[0];
   }
 
+  /**
+   * Writes a whole batch of id -> name pairs in one transaction.
+   *
+   * All or nothing: a half-written mapping would leave some sources named
+   * and others not, and the sync would then send for some partners and stay
+   * silent for the rest with nothing to show why.
+   *
+   * @param {Array<{id: string, name: string}>} sources
+   * @returns {Promise<number>} how many were written
+   */
+  async saveSourceNames(sources) {
+    if (!sources.length) return 0;
+
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      for (const source of sources) {
+        await client.query(
+          `INSERT INTO source_names (source_id, source_name)
+           VALUES ($1, $2)
+           ON CONFLICT (source_id) DO UPDATE
+             SET source_name = EXCLUDED.source_name, updated_at = now()`,
+          [source.id, source.name]);
+      }
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    return sources.length;
+  }
+
   /** @param {string} sourceId */
   async deleteSourceName(sourceId) {
     const { rowCount } = await this.pool.query(

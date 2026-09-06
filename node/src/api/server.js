@@ -15,6 +15,7 @@ import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
 import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
+import { SurenseClient } from '../surense.js';
 
 /**
  * Compares two secrets without leaking their contents through timing.
@@ -431,6 +432,34 @@ export function createApi({ db, config }) {
     for (const item of list) saved.push(await db.saveSourceName(item));
 
     return { saved: saved.length, sourceNames: saved };
+  });
+
+  // Pulls the whole id -> name list from the CRM in one call and stores it.
+  // The sync does this too; this exists so a source added in the CRM can be
+  // picked up now rather than at the top of the hour.
+  route('POST', /^\/api\/source-names\/refresh$/, async () => {
+    const client = new SurenseClient(config.surense);
+
+    try {
+      const sources = await client.fetchSources();
+      const saved = await db.saveSourceNames(sources);
+      const stillUnnamed = (await db.listSourcesInUse(config.messaging.columns.source))
+        .filter(source => !source.resolved);
+
+      return {
+        fetched: sources.length,
+        saved,
+        stillUnnamedInUse: stillUnnamed.length,
+        examples: stillUnnamed.slice(0, 5).map(source => source.source_id)
+      };
+    } catch (error) {
+      return { status: 502, body: {
+        error: error.message,
+        hint: error.status === 400 || error.status === 403
+          ? 'GET /customers/sources needs the customers:read scope on the API client.'
+          : (error.hint ?? null)
+      } };
+    }
   });
 
   route('DELETE', /^\/api\/source-names\/(.+)$/, async (_request, params) => {

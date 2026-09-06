@@ -204,6 +204,46 @@ export class SurenseClient {
   }
 
   /**
+   * Every referring source, by id and name.
+   *
+   * This is the one call that makes the notifications possible at all. A lead
+   * carries sourceId — a UUID — and no source name anywhere, while the
+   * recipients are keyed by the partner's name. Without this the two never
+   * meet and nothing is ever sent.
+   *
+   * The name lives under `title`, not `name`: verified against a live
+   * response, where sourceId 40db82e8… resolved to "סו״ב רועי כץ", the same
+   * value the CRM screen shows for that lead.
+   *
+   * Needs the customers:read scope. A client without it is refused with 400,
+   * not 403, so the error is easy to misread as a malformed request.
+   *
+   * @returns {Promise<Array<{id: string, name: string, active: boolean}>>}
+   */
+  async fetchSources() {
+    await this.resolveBase();
+    const parsed = await this.request('GET', '/customers/sources');
+
+    return extractRows(parsed)
+      .map(source => {
+        const id = source.id ?? source.sourceId ?? source.code;
+        const name = source.title ?? source.name ?? source.label ?? source.description;
+
+        if (!id || !name) return null;
+
+        return {
+          id: String(id),
+          name: String(name),
+          // An inactive source still needs a name: leads referring to one
+          // that was retired last year are still in the CRM, and a status
+          // change on them must not read as an unmapped UUID.
+          active: source.active !== false
+        };
+      })
+      .filter(Boolean);
+  }
+
+  /**
    * Every lead, following pagination to the end.
    *
    * Reports whether the read completed: a caller must never treat a truncated

@@ -47,6 +47,27 @@ async function execute({ db, config, trigger, fetchImpl }) {
 
     const { leads, complete } = await client.fetchAllLeads();
 
+    // The id -> name mapping for the referring sources. One call covers every
+    // source there is, so it is refreshed on each run rather than being a
+    // table anyone has to maintain by hand.
+    //
+    // Deliberately not fatal. This mapping decides who a message is addressed
+    // to, not what the mirror holds, and a CRM that stops answering here must
+    // not also stop the lead sync — the previous mapping stays in place and
+    // the run reports why it did not move.
+    let sourcesMapped = 0;
+    let sourcesError = null;
+
+    try {
+      sourcesMapped = await db.saveSourceNames(await client.fetchSources());
+    } catch (error) {
+      sourcesError = error.message;
+      console.warn(`The source names could not be refreshed: ${error.message}` +
+        (error.status === 400 || error.status === 403
+          ? ' — this call needs the customers:read scope on the API client.'
+          : ''));
+    }
+
     // A truncated read must never be applied: every lead not read would be
     // recorded as having disappeared from the CRM.
     if (!complete) {
@@ -116,6 +137,8 @@ async function execute({ db, config, trigger, fetchImpl }) {
       columns: headerFor(columns).length,
       columnNames: columns.slice(0, 12).map(column => column.label),
       rebaselined: Boolean(existing.relabelled),
+      sourcesMapped,
+      sourcesError,
       changesRecorded: changes.length,
       durationMs: Date.now() - startedAt.getTime(),
       ...stats
