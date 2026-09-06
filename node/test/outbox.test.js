@@ -13,7 +13,7 @@ import { Database } from '../src/db/index.js';
 import { createApi } from '../src/api/server.js';
 import { buildOutbox, render, SKIP } from '../src/notify/outbox.js';
 import { normalizeText } from '../src/mirror.js';
-import { SEED_TEMPLATES } from '../src/notify/seeds.js';
+import { SEED_TEMPLATES, MUTED_STATUSES } from '../src/notify/seeds.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ??
   'postgresql://postgres@127.0.0.1:5433/surense';
@@ -415,18 +415,75 @@ test('the brake lets exactly the limit through', () => {
 });
 
 // ----------------------------------------------------------- through the API
-test('the seeded templates are the eight the plan gives wording for', async () => {
+test('the seeded templates are exactly the statuses given wording', async () => {
   const written = await db.seedTemplates(SEED_TEMPLATES);
-  assert.equal(written, 8);
+  assert.equal(written, SEED_TEMPLATES.length);
 
   const { templates } = await (await call('/api/templates')).json();
-  assert.equal(templates.length, 8);
+  assert.equal(templates.length, SEED_TEMPLATES.length);
 
   const noAnswer = templates.find(t => t.status === 'לא ענה');
   assert.equal(noAnswer.message, 'ניסינו ליצור קשר עם הלקוח אין מענה 1');
 
-  // "חדש" and "רלוונטי ל2025" are on the plan's do-not-send list.
-  assert.equal(templates.some(t => t.status === 'חדש'), false);
+  // Muted statuses must have no wording at all — silence is the default, and
+  // a template here would turn it into a message.
+  for (const muted of MUTED_STATUSES) {
+    assert.equal(templates.some(t => normalizeText(t.status) === normalizeText(muted)),
+      false, `${muted} is muted but has a template`);
+  }
+});
+
+test('no status is both muted and given wording', () => {
+  const send = new Set(SEED_TEMPLATES.map(t => normalizeText(t.status)));
+  const overlap = MUTED_STATUSES.filter(m => send.has(normalizeText(m)));
+
+  assert.deepEqual(overlap, []);
+});
+
+test('every status the CRM actually uses is classified', () => {
+  // The 42 the live CRM carries. Several differ by one word from a status on
+  // the other list — חתימה/בחתימה, לאחר בדיקה/לאחר בדיקה לא זכאי, שולם
+  // סוכן/שולם לקוח — so a status falling through to neither list is a
+  // message quietly not sent, or one quietly sent that should not be.
+  const CRM_STATUSES = [
+    'טיפול הסתיים - שולם סוכן', 'לאחר בדיקה לא זכאי', 'לא מעוניין',
+    'חידוש 2026', 'לא עונה זמן רב', 'לא רלוונטי לאחר שיחה ראשונית',
+    'לא משתף פעולה', 'הוגש', 'חידוש 2025', 'ממתין למסמכים מהלקוח',
+    'התקבל', 'טיפול הסתיים - שולם לקוח', 'חידוש 2027', 'בחתימה', 'חתימה',
+    'לאחר בדיקה', "י''כ שנפלו", 'השהיה', 'ממתין לת.ז', 'התקבל חלקי',
+    'בבדיקה', 'לא שלח ת.ז - זמן רב', 'רלוונטי ל2026', 'לא חותם - זמן רב',
+    'אישור ב"ל', 'לא ענה', 'הוגש ממתין ל......', 'ממתין לשליחה', 'חדש',
+    'חתום - לא ניתן להגיש', 'לחזור במועד אחר', 'חידוש 2028', 'ממתין ל...',
+    'הוגש - ממתין למסמכים מהלקוח', 'לא עונה 2', 'חסר זיהוי',
+    'ממתין לייפוי כוח', 'לא עונה 3', 'מתלבט לגבי העמלה', 'רלוונטי ל2025',
+    'חסר אישור ייצוג', 'נסגר'
+  ];
+
+  const send = new Set(SEED_TEMPLATES.map(t => normalizeText(t.status)));
+  const mute = new Set(MUTED_STATUSES.map(normalizeText));
+
+  const unclassified = CRM_STATUSES
+    .filter(s => !send.has(normalizeText(s)) && !mute.has(normalizeText(s)));
+
+  assert.deepEqual(unclassified, []);
+});
+
+test('a status typed with an en dash still matches the CRM hyphen', () => {
+  // The CRM stores "טיפול הסתיים - שולם לקוח" with a plain hyphen. A template
+  // typed with an en dash — as the spec was written — would never match, and
+  // the message would silently never go out.
+  const send = new Set(SEED_TEMPLATES.map(t => normalizeText(t.status)));
+
+  assert.ok(send.has(normalizeText('טיפול הסתיים – שולם לקוח')));
+  assert.ok(send.has(normalizeText('לא שלח ת.ז – זמן רב')));
+  assert.ok(send.has(normalizeText('לא חותם – זמן רב')));
+
+  // And the near-miss pairs must stay apart.
+  assert.notEqual(normalizeText('טיפול הסתיים - שולם סוכן'),
+    normalizeText('טיפול הסתיים - שולם לקוח'));
+  assert.notEqual(normalizeText('חתימה'), normalizeText('בחתימה'));
+  assert.notEqual(normalizeText('הוגש'),
+    normalizeText('הוגש - ממתין למסמכים מהלקוח'));
 });
 
 test('seeding never overwrites wording that was edited', async () => {
@@ -693,7 +750,7 @@ test('diagnostics reports the wiring in one response', async () => {
   const report = await (await call('/api/diagnostics')).json();
 
   assert.equal(report.counts.leads, 1);
-  assert.equal(report.counts.templates, 8);
+  assert.equal(report.counts.templates, SEED_TEMPLATES.length);
   assert.equal(report.counts.recipients, 0);
   assert.equal(report.counts.columnsInCrm, 4);
 

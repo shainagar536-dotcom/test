@@ -242,6 +242,7 @@ export const DELIVERY_LABELS = {
   'source-id-not-mapped': 'מזהה המקור לא ממופה לשם',
   'source-not-in-recipients': 'המקור לא נמצא בטבלת הנמענים',
   'source-not-looked-up-yet': 'המקור עוד לא נבדק מול ה-CRM',
+  'message-has-an-unfilled-value': 'חסר ערך בנוסח (סך הכל) — לא נשלח',
   'recipient-inactive': 'הנמען מושבת',
   'recipient-has-no-address': 'לנמען אין כתובת'
 };
@@ -266,8 +267,12 @@ export const EVENT_LABELS = {
   status_after: 'לסטטוס',
   assignee_name: 'מטפל',
   source_name: 'מקור מפנה',
+  channel: 'ערוץ',
   handled: 'טופל'
 };
+
+/** How a message went out. */
+export const CHANNEL_LABELS = { email: 'מייל', whatsapp: 'וואטסאפ' };
 
 /** How a source lookup ended up, in Hebrew. */
 export const SOURCE_STATE_LABELS = {
@@ -298,7 +303,8 @@ export function describeEvent(event, sendable, reasons) {
       label: DELIVERY_LABELS.sent,
       reason: null,
       at: formatDate(event.notified_at),
-      via: event.notified_via || null,
+      via: event.notified_via
+        ? (CHANNEL_LABELS[event.notified_via] ?? event.notified_via) : null,
       to: event.notified_to || null
     }
     : sendable.has(id)
@@ -324,7 +330,12 @@ export function describeEvent(event, sendable, reasons) {
       status_after: event.status_after || '',
       assignee_name: event.assignee_name || '',
       source_name: event.source_name ||
-        SOURCE_STATE_LABELS[event.source_state] || ''
+        SOURCE_STATE_LABELS[event.source_state] || '',
+
+      // What it actually went out on, which is only known once it has.
+      channel: event.notified_via
+        ? (CHANNEL_LABELS[event.notified_via] ?? event.notified_via)
+        : ''
     },
     sourceState: event.source_state,
     sourceStateLabel: SOURCE_STATE_LABELS[event.source_state] ?? event.source_state,

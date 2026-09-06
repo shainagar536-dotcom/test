@@ -221,6 +221,13 @@ export function loadConfig() {
         clientName: optional('CLIENT_NAME_COLUMN', 'fullName'),
         leadNumber: optional('LEAD_NUMBER_COLUMN', 'number'),
 
+        // The "סך הכל" amount, quoted by the wording for הוגש and for
+        // טיפול הסתיים - שולם לקוח. No such field is among the 78 the CRM
+        // returns today, so this is empty and those two messages are held
+        // rather than sent with the placeholder showing. Set it to the field
+        // key once the CRM exposes one.
+        total: optional('TOTAL_COLUMN', ''),
+
         // Who in the CRM handles the lead. Arrives with the lead already
         // named, unlike the source, so it needs no lookup of its own.
         assignee: optional('ASSIGNEE_COLUMN', 'assigneeName')

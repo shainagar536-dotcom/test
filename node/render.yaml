@@ -15,10 +15,27 @@ services:
     startCommand: node src/server.js
     healthCheckPath: /health
     envVars:
+      # --- Surense CRM ------------------------------------------------
+      # The credentials. Secrets never live in this file; Render prompts for
+      # them once and stores them.
       - key: SURENSE_CLIENT_ID
-        sync: false          # set in the dashboard, never in this file
+        sync: false
       - key: SURENSE_CLIENT_SECRET
         sync: false
+
+      # Where the CRM lives. Listed here with their working values rather
+      # than left to the code's defaults, so they are visible and editable in
+      # the dashboard: a host or a token path that changes is then a field to
+      # edit, not a deploy.
+      - key: SURENSE_TOKEN_URL
+        value: https://api.surense.com/oauth/token
+      - key: SURENSE_API_BASE
+        value: https://api.surense.com/api/v1,https://www.surense.com/api/v1
+
+      # One call returns every referring source by id and name.
+      # The name arrives under `title`, not `name`.
+      - key: SOURCE_CATALOG_PATH
+        value: /customers/sources
       - key: API_TOKEN
         generateValue: true  # Render generates and stores a strong value
       - key: WEBHOOK_SECRET
@@ -37,6 +54,32 @@ services:
         value: 8,9,10,11,12,13,14,15,16,17,18,19,20
       - key: MAX_SENDS_PER_RUN
         value: "25"
+
+      # --- What is stored ---------------------------------------------
+      # Keep a copy of every lead. Off: the service records status changes
+      # and the source behind each one, which needs no copy of the CRM.
+      - key: MIRROR_LEADS
+        value: "false"
+
+      # --- Which CRM fields carry meaning -----------------------------
+      # Surense's own field keys. Here so a CRM change is a field to edit.
+      - key: STATUS_COLUMN
+        value: statusName
+      - key: SOURCE_ID_COLUMN
+        value: sourceId
+      - key: ASSIGNEE_COLUMN
+        value: assigneeName
+      - key: CLIENT_NAME_COLUMN
+        value: fullName
+      - key: LEAD_NUMBER_COLUMN
+        value: number
+
+      # --- Pilot safety net -------------------------------------------
+      # While this holds an address, every message goes there instead of to
+      # the referring source. Clearing it is the deliberate act that goes
+      # live, so it is set in the dashboard rather than fixed here.
+      - key: REDIRECT_ALL_TO
+        sync: false
 
 databases:
   - name: surense-db

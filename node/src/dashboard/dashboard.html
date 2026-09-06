@@ -118,6 +118,9 @@
     border-bottom-width: 2px;
   }
 
+  th.sortable { cursor: pointer; user-select: none; color: var(--accent); }
+  th.sortable:hover { text-decoration: underline; }
+
   tbody tr { cursor: pointer; }
   tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
   tbody tr:last-child td { border-bottom: none; }
@@ -229,6 +232,11 @@
       <option value="open">לא טופל</option>
       <option value="sent">נשלח</option>
     </select>
+    <select id="channel">
+      <option value="">כל הערוצים</option>
+      <option value="whatsapp">נשלח בוואטסאפ</option>
+      <option value="email">נשלח במייל</option>
+    </select>
     <select id="status"><option value="">כל הסטטוסים</option></select>
     <select id="assignee"><option value="">כל המטפלים</option></select>
     <select id="limit">
@@ -271,12 +279,13 @@ const KEY_TOKEN = 'surense.token';
 // a notification needs, so there is nothing to choose between.
 const COLUMNS = [
   'occurred_at', 'customer_name', 'lead_number',
-  'status_before', 'status_after', 'assignee_name', 'source_name'
+  'status_before', 'status_after', 'assignee_name', 'source_name', 'channel'
 ];
 
 const state = {
   token: '', offset: 0, limit: 50,
-  q: '', delivery: 'all', status: '', assignee: '',
+  q: '', delivery: 'all', status: '', assignee: '', channel: '',
+  sort: 'desc',
   total: 0, events: []
 };
 
@@ -381,15 +390,29 @@ function renderCards(data) {
   $('cards').innerHTML =
     card(n(c.total), 'שינויי סטטוס', n(c.leads) + ' לידים') +
     card(n(c.open), 'לא טופלו', 'ממתינים לשליחה') +
-    card(n(c.sent), 'נשלחו', 'הודעות שיצאו') +
+    card(n(c.sent), 'נשלחו',
+         'וואטסאפ ' + n(c.whatsapp) + ' · מייל ' + n(c.email)) +
     card(n(c.unresolved), 'מקור עוד לא זוהה', n(c.resolved) + ' זוהו') +
     card(n(data.recipients), 'נמענים מוגדרים',
          data.redirectAllTo ? 'פיילוט: הכול ל־' + esc(data.redirectAllTo) : 'שליחה חיה');
 }
 
 function renderTable() {
+  // The date column is the sort. An arrow that shows the current direction
+  // beats a control somewhere else that claims one.
+  const arrow = state.sort === 'asc' ? ' ↑' : ' ↓';
+
   $('head').innerHTML =
-    COLUMNS.map(c => '<th>' + esc(labelOf(c)) + '</th>').join('') + '<th>טופל</th>';
+    COLUMNS.map(c => c === 'occurred_at'
+      ? '<th class="sortable" id="sortDate" title="לחץ כדי להפוך את הסדר">' +
+        esc(labelOf(c)) + arrow + '</th>'
+      : '<th>' + esc(labelOf(c)) + '</th>').join('') + '<th>טופל</th>';
+
+  const header = $('sortDate');
+  if (header) header.onclick = () => {
+    state.sort = state.sort === 'asc' ? 'desc' : 'asc';
+    reload(true);
+  };
 
   $('rows').innerHTML = state.events.map((event, i) =>
     '<tr data-i="' + i + '">' +
@@ -460,7 +483,8 @@ async function load() {
   const query = new URLSearchParams({
     limit: state.limit, offset: state.offset,
     search: state.q, delivery: state.delivery,
-    status: state.status, assignee: state.assignee
+    status: state.status, assignee: state.assignee,
+    channel: state.channel, sort: state.sort
   });
 
   try {
@@ -490,6 +514,7 @@ function reload(resetPage) {
 
 $('q').oninput = () => { state.q = $('q').value.trim(); reload(true); };
 $('delivery').onchange = () => { state.delivery = $('delivery').value; reload(true); };
+$('channel').onchange = () => { state.channel = $('channel').value; reload(true); };
 $('status').onchange = () => { state.status = $('status').value; reload(true); };
 $('assignee').onchange = () => { state.assignee = $('assignee').value; reload(true); };
 $('limit').onchange = () => { state.limit = Number($('limit').value); reload(true); };

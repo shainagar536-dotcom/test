@@ -72,6 +72,11 @@ export async function enrichEvent({
   const assigneeName = String(
     lead[columns.assignee] ?? lead.assigneeName ?? lead.ownerName ?? '');
 
+  // Only read when a column is configured for it: with no column set, an
+  // empty amount is the honest answer, and the wording that quotes it is
+  // held rather than sent half-written.
+  const amount = columns.total ? String(lead[columns.total] ?? '') : '';
+
   const { name: direct, id: sourceId } =
     resolveSourceName(lead, columns, sourceNames);
 
@@ -79,6 +84,7 @@ export async function enrichEvent({
   if (direct) {
     return {
       assigneeName,
+      amount,
       sourceId,
       sourceName: direct,
       sourceState: SOURCE_STATE.resolved,
@@ -91,6 +97,7 @@ export async function enrichEvent({
   if (!sourceId) {
     return {
       assigneeName,
+      amount,
       sourceState: SOURCE_STATE.absent,
       sourceError: ''
     };
@@ -108,6 +115,7 @@ export async function enrichEvent({
     } catch (error) {
       return {
         assigneeName,
+        amount,
         sourceId,
         sourceState: SOURCE_STATE.failed,
         sourceError: `source catalog refresh failed: ${error.message}`
@@ -118,6 +126,7 @@ export async function enrichEvent({
   if (!mapped) {
     return {
       assigneeName,
+      amount,
       sourceId,
       sourceState: SOURCE_STATE.failed,
       sourceError: 'the source id is not in the CRM catalog'
@@ -126,6 +135,7 @@ export async function enrichEvent({
 
   return {
     assigneeName,
+    amount,
     sourceId,
     sourceName: mapped,
     sourceState: SOURCE_STATE.resolved,

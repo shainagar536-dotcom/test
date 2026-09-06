@@ -163,7 +163,24 @@ export function normalizeText(value) {
   return String(value)
     .replace(/[\u2018\u2019\u05F3\u02BC]/g, "'")     // curly and Hebrew geresh
     .replace(/[\u201C\u201D\u05F4]/g, '"')            // curly and Hebrew gershayim
+
+    // Two apostrophes are how a Hebrew abbreviation is typed when the
+    // gershayim is not to hand: the CRM stores י''כ שנפלו, while the same
+    // status is written י"כ שנפלו everywhere else. Unfolded, the template
+    // never matches the status and the message silently never goes out.
+    .replace(/''/g, '"')
+
+    // En dash, em dash and minus all stand in for the hyphen in a status
+    // name. The CRM stores "טיפול הסתיים - שולם לקוח" with a plain hyphen,
+    // and a template typed with an en dash is a message that never sends.
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+
     .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF]/g, '')  // zero-width and bidi marks
+
+    // " - " and "-" are the same separator to a reader, so they are the same
+    // key here too.
+    .replace(/\s*-\s*/g, '-')
+
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();

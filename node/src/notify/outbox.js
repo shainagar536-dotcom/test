@@ -32,8 +32,44 @@ export const SKIP = {
 
   // The event is recorded but its source has not been looked up yet. Not a
   // reason to send nothing forever — a reason to wait for the enrichment pass.
-  sourcePending: 'source-not-looked-up-yet'
+  sourcePending: 'source-not-looked-up-yet',
+
+  // The wording quotes a value the event does not carry — today that means
+  // {total}, the "סך הכל" amount the CRM does not expose. Sending
+  // "הוגשו החזרים בסך {total}" to a partner is worse than sending nothing,
+  // and worse than either is not knowing it happened.
+  unfilled: 'message-has-an-unfilled-value'
 };
+
+/** A placeholder still sitting in the text after filling. */
+const UNFILLED = /\{[^{}]{1,60}\}/;
+
+/**
+ * Fills placeholders, treating a known-but-empty value as empty.
+ *
+ * render() leaves an empty value visible, which is right for a draft: an
+ * unfilled slot is a bug report. It is wrong here, because a lead with no
+ * handler would leave "{assignee}" in a message to a partner — or, with the
+ * hold below, stop the message going out at all over a field nobody needs.
+ *
+ * So a key we know about renders as itself even when empty, and only a key
+ * we have never heard of survives — which is a typo in a template, and worth
+ * holding for.
+ *
+ * @param {string} text
+ * @param {Record<string, unknown>} values
+ * @returns {string}
+ */
+function fill(text, values) {
+  return String(text).replace(/\{([^{}]{1,60})\}/g, (whole, key) => {
+    const trimmed = key.trim();
+
+    if (!Object.hasOwn(values, trimmed)) return whole;
+
+    const value = values[trimmed];
+    return value === null || value === undefined ? '' : String(value);
+  });
+}
 
 /**
  * Fills {placeholders} from the lead's fields plus a few extras.
@@ -259,18 +295,38 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     const address = template.channel === 'whatsapp' ? recipient.whatsapp : recipient.email;
     if (!address) { skip(SKIP.noAddress, event.source_name); continue; }
 
+    // The amount is the one value whose absence changes what the sentence
+    // means: "הוגשו החזרים בסך" followed by nothing is not a message anyone
+    // should receive. Held until the CRM supplies it.
+    if (/\{\s*total\s*\}/.test(template.message) && !event.amount) {
+      skip(SKIP.unfilled, '{total}');
+      continue;
+    }
+
     const values = {
       status,
       statusBefore: event.status_before ?? '',
-      message: template.message,
+      message: fill(template.message, { total: event.amount ?? '' }),
       source: recipient.source_name,
       client: event.customer_name ?? '',
       leadNumber: event.lead_number || event.lead_id,
       assignee: event.assignee_name ?? '',
+      total: event.amount ?? '',
       signature: messaging.signature
     };
 
     const redirected = Boolean(messaging.redirectAllTo);
+
+    const subject = fill(messaging.subject, values);
+    const body = fill(messaging.body, values);
+
+    // Anything still unfilled is a placeholder nobody defined — a typo in a
+    // template edited through the API. Sending it would put "{clinet}" in
+    // front of a partner, so it is held and named instead.
+    if (UNFILLED.test(subject) || UNFILLED.test(body)) {
+      skip(SKIP.unfilled, (subject + ' ' + body).match(UNFILLED)?.[0] ?? null);
+      continue;
+    }
 
     ready.push({
       eventId: Number(event.id),
@@ -284,10 +340,8 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
       assignee: event.assignee_name,
       status,
       statusBefore: event.status_before ?? '',
-      subject: redirected
-        ? `[פיילוט → ${address}] ${render(messaging.subject, values)}`
-        : render(messaging.subject, values),
-      body: render(messaging.body, values),
+      subject: redirected ? `[פיילוט → ${address}] ${subject}` : subject,
+      body,
       occurredAt: event.occurred_at
     });
   }

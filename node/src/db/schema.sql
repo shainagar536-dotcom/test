@@ -205,6 +205,12 @@ CREATE TABLE IF NOT EXISTS status_events (
     -- The CRM user handling the lead. Arrives with the lead, needs no lookup.
     assignee_name  TEXT        NOT NULL DEFAULT '',
 
+    -- The "סך הכל" amount, for the two statuses whose wording quotes it.
+    -- Captured with the rest of the lookup; empty when the CRM has no such
+    -- field, and a message that needs it is then held rather than sent with
+    -- the placeholder still in it.
+    amount         TEXT        NOT NULL DEFAULT '',
+
     -- The referring source: the id the lead carries, and the name resolved
     -- for it. `source_state` says which of those is true yet.
     source_id      TEXT        NOT NULL DEFAULT '',
@@ -227,6 +233,8 @@ CREATE TABLE IF NOT EXISTS status_events (
     notified_via   TEXT        NOT NULL DEFAULT '',
     notified_to    TEXT        NOT NULL DEFAULT ''
 );
+
+ALTER TABLE status_events ADD COLUMN IF NOT EXISTS amount TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS status_events_occurred_idx
     ON status_events (occurred_at DESC, id DESC);

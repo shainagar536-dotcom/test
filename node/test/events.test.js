@@ -29,7 +29,11 @@ const COLUMNS = {
 };
 
 const config = {
-  surense: { clientId: 'x', clientSecret: 'y', tokenUrl: 'https://crm.test/oauth/token',
+  // Realistic shapes: a one-character secret makes "the response does not
+  // contain the secret" true by accident for every response.
+  surense: { clientId: 'cid_0123456789abcdef',
+    clientSecret: 'csk_zzqqxx_never_in_a_response',
+    tokenUrl: 'https://crm.test/oauth/token',
     apiBases: ['https://crm.test/api/v1'], pageSize: 50, maxPages: 40 },
   database: { url: DATABASE_URL, ssl: false, maxConnections: 4 },
   api: { port: 0, token: 'test-token', webhookSecret: 'hook' },
@@ -40,7 +44,8 @@ const config = {
   messaging: {
     columns: COLUMNS,
     subject: 'עדכון — {client}',
-    body: 'שלום {source},\nלקוח {client} עבר ל{status}. מטפל: {assignee}\n{signature}',
+    body: 'שלום {source},\nלקוח {client} עבר ל{status}. מטפל: {assignee}\n' +
+      '{message}\n{signature}',
     signature: 'בברכה', maxPerRun: 25, redirectAllTo: ''
   }
 };
@@ -420,4 +425,200 @@ test('the filters offer only what the log actually holds', async () => {
   assert.deepEqual(meta.statuses, [{ value: 'לא ענה', leads: 1 }]);
   assert.deepEqual(meta.assignees, [{ value: 'שי נגר', leads: 1 }]);
   assert.equal(meta.labels.assignee_name, 'מטפל');
+});
+
+// ------------------------------------------------------------ the settings
+
+test('the settings page shows the CRM config without leaking the secret', async () => {
+  const body = await (await call('/api/crm')).json();
+
+  assert.equal(body.settings.tokenUrl, 'https://crm.test/oauth/token');
+  assert.deepEqual(body.settings.apiBases, ['https://crm.test/api/v1']);
+  assert.equal(body.settings.sourceCatalogPath, '/customers/sources');
+  assert.equal(body.settings.mirrorLeads, false);
+
+  // The id is masked and the secret is absent entirely — a settings page that
+  // hands back the credential is not a settings page.
+  assert.equal(body.settings.clientSecretSet, true);
+  assert.ok(!JSON.stringify(body).includes(config.surense.clientSecret));
+  assert.ok(!JSON.stringify(body).includes(config.surense.clientId));
+});
+
+test('the settings check authenticates and proves the catalog works', async () => {
+  const { client } = fakeCrm();
+
+  const probe = createApi({ db, config, fetchImpl: client.fetch });
+  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+
+  const url = `http://127.0.0.1:${probe.address().port}/api/crm`;
+
+  const body = await (await fetch(url, {
+    method: 'POST', headers: { Authorization: 'Bearer test-token' }
+  })).json();
+
+  assert.equal(body.auth.ok, true);
+  assert.equal(body.auth.scope, 'leads:read');
+  assert.equal(body.apiBase, 'https://crm.test/api/v1');
+  assert.equal(body.sourceCatalog.ok, true);
+  assert.equal(body.sourceCatalog.sources, 1);
+  assert.equal(body.sourceCatalog.example, SOURCE_TITLE);
+
+  probe.close();
+});
+
+test('a wrong setting is reported as such, not as a mystery', async () => {
+  const broken = createApi({
+    db,
+    config: { ...config, sourceCatalogPath: '/nope' },
+    fetchImpl: fakeCrm().client.fetch
+  });
+
+  await new Promise(resolve => broken.listen(0, '127.0.0.1', resolve));
+
+  const body = await (await fetch(
+    `http://127.0.0.1:${broken.address().port}/api/crm`,
+    { method: 'POST', headers: { Authorization: 'Bearer test-token' } })).json();
+
+  assert.equal(body.auth.ok, true);
+  assert.equal(body.sourceCatalog.ok, false);
+  assert.equal(body.sourceCatalog.path, '/nope');
+  assert.match(body.sourceCatalog.error, /404/);
+
+  broken.close();
+});
+
+// ------------------------------------------------- wording that needs a value
+
+test('a message quoting an amount is held when the amount is missing', async () => {
+  // "הוגשו החזרים בסך {total}" with no total is worse sent than unsent: the
+  // partner gets the placeholder. No CRM field carries this today, so this is
+  // the live case, not a hypothetical one.
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', leadNumber: '3500',
+    statusBefore: 'בבדיקה', statusAfter: 'הוגש',
+    sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveTemplate({
+    status: 'הוגש', message: 'הלקוח נמצא זכאי ! הוגשו החזרים בסך {total}'
+  });
+
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', whatsapp: '', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 0);
+  assert.equal(Object.keys(outbox.skipped)[0], 'message-has-an-unfilled-value');
+});
+
+test('the same message goes out once the amount is known', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', leadNumber: '3500',
+    statusBefore: 'בבדיקה', statusAfter: 'הוגש',
+    sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.enrichStatusEvent(id, {
+    amount: '12,430 ₪', sourceState: 'resolved', sourceName: SOURCE_TITLE
+  });
+
+  await db.saveTemplate({
+    status: 'הוגש', message: 'הלקוח נמצא זכאי ! הוגשו החזרים בסך {total}'
+  });
+
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', whatsapp: '', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 1);
+  assert.match(outbox.messages[0].body, /הוגשו החזרים בסך 12,430 ₪/);
+});
+
+test('the log can be walked oldest-first as well as newest-first', async () => {
+  for (let i = 0; i < 3; i++) {
+    await db.recordStatusEvent({
+      leadId: `lead-${i}`, customerName: `לקוח ${i}`,
+      statusBefore: 'חדש', statusAfter: 'לא ענה',
+      occurredAt: new Date(Date.UTC(2026, 8, 1 + i)).toISOString()
+    });
+  }
+
+  const newest = await (await call('/api/dashboard/events?sort=desc')).json();
+  const oldest = await (await call('/api/dashboard/events?sort=asc')).json();
+
+  assert.deepEqual(newest.events.map(e => e.display.customer_name),
+    ['לקוח 2', 'לקוח 1', 'לקוח 0']);
+  assert.deepEqual(oldest.events.map(e => e.display.customer_name),
+    ['לקוח 0', 'לקוח 1', 'לקוח 2']);
+});
+
+test('what went out by WhatsApp can be told from what went by email', async () => {
+  const a = await db.recordStatusEvent({
+    leadId: 'w1', customerName: 'בוואטסאפ', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-01T10:00:00Z'
+  });
+  const b = await db.recordStatusEvent({
+    leadId: 'e1', customerName: 'במייל', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-02T10:00:00Z'
+  });
+
+  await db.markEventsNotified([a.id], 'whatsapp', '+972500000000');
+  await db.markEventsNotified([b.id], 'email', 'a@example.com');
+
+  const whatsapp = await (await call('/api/dashboard/events?channel=whatsapp')).json();
+  const email = await (await call('/api/dashboard/events?channel=email')).json();
+
+  assert.equal(whatsapp.total, 1);
+  assert.equal(whatsapp.events[0].display.customer_name, 'בוואטסאפ');
+  assert.equal(whatsapp.events[0].display.channel, 'וואטסאפ');
+
+  assert.equal(email.total, 1);
+  assert.equal(email.events[0].display.channel, 'מייל');
+
+  const counts = (await (await call('/api/dashboard/events')).json()).counts;
+  assert.equal(counts.whatsapp, 1);
+  assert.equal(counts.email, 1);
+});
+
+test('an empty optional field does not hold the message back', async () => {
+  // A lead with no handler must still notify its source. Holding the whole
+  // message over a field nobody reads would be the fix being worse than the
+  // problem.
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', whatsapp: '', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 1);
+  assert.ok(!outbox.messages[0].body.includes('{'));
+});
+
+test('a template with a misspelled placeholder is held, not sent', async () => {
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  // {clinet} is not a placeholder anyone defined. It must not reach a partner.
+  await db.saveTemplate({ status: 'לא ענה', message: 'שלום {clinet}, אין מענה' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', whatsapp: '', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 0);
+  assert.equal(Object.keys(outbox.skipped)[0], 'message-has-an-unfilled-value');
+  assert.deepEqual(outbox.skipped['message-has-an-unfilled-value'].examples, ['{clinet}']);
 });

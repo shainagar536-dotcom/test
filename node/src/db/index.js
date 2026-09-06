@@ -808,7 +808,7 @@ export class Database {
         event.sourceId ?? '',
         event.sourceName ?? '',
         event.sourceState ?? 'pending',
-        toTimestamp(event.occurredAt) ?? new Date()
+        eventTimestamp(event.occurredAt)
       ]);
 
     if (rows.length) return { id: Number(rows[0].id), created: true };
@@ -820,7 +820,7 @@ export class Database {
         WHERE lead_id = $1 AND status_before = $2
           AND status_after = $3 AND occurred_at = $4`,
       [event.leadId, event.statusBefore ?? '', event.statusAfter ?? '',
-        toTimestamp(event.occurredAt) ?? new Date()]);
+        eventTimestamp(event.occurredAt)]);
 
     return { id: existing.length ? Number(existing[0].id) : 0, created: false };
   }
@@ -834,7 +834,8 @@ export class Database {
   async enrichStatusEvent(id, patch) {
     await this.pool.query(
       `UPDATE status_events
-          SET assignee_name = coalesce(NULLIF($2, ''), assignee_name),
+          SET amount        = coalesce(NULLIF($7, ''), amount),
+              assignee_name = coalesce(NULLIF($2, ''), assignee_name),
               source_id     = coalesce(NULLIF($3, ''), source_id),
               source_name   = coalesce(NULLIF($4, ''), source_name),
               source_state  = $5,
@@ -842,7 +843,7 @@ export class Database {
               enrich_attempts = enrich_attempts + 1
         WHERE id = $1`,
       [id, patch.assigneeName ?? '', patch.sourceId ?? '', patch.sourceName ?? '',
-        patch.sourceState ?? 'pending', patch.sourceError ?? '']);
+        patch.sourceState ?? 'pending', patch.sourceError ?? '', patch.amount ?? '']);
   }
 
   /**
@@ -875,7 +876,7 @@ export class Database {
    */
   async listStatusEvents({
     limit = 100, offset = 0, pendingOnly = false, sinceId, search = '',
-    status = '', assignee = '', delivery = 'all'
+    status = '', assignee = '', delivery = 'all', channel = '', sort = 'desc'
   } = {}) {
     const params = [];
     const where = [];
@@ -908,6 +909,13 @@ export class Database {
     if (delivery === 'sent') where.push('notified_at IS NOT NULL');
     if (delivery === 'open') where.push('notified_at IS NULL');
 
+    // Which channel a message actually went out on, so "what did we send by
+    // WhatsApp" is a filter rather than a read-through.
+    if (channel) {
+      params.push(channel);
+      where.push(`notified_via = $${params.length}`);
+    }
+
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     params.push(Math.min(Math.max(limit, 1), 500));
@@ -916,17 +924,64 @@ export class Database {
     const { rows } = await this.pool.query(
       `SELECT * FROM status_events
         ${clause}
-        ORDER BY occurred_at DESC, id DESC
+        ORDER BY occurred_at ${sort === 'asc' ? 'ASC' : 'DESC'},
+                 id ${sort === 'asc' ? 'ASC' : 'DESC'}
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params);
 
     return rows;
   }
 
-  /** @param {object} [options] */
-  async countStatusEvents(options = {}) {
-    const rows = await this.listStatusEvents({ ...options, limit: 500, offset: 0 });
-    return rows.length;
+  /**
+   * How many events match, for paging.
+   *
+   * Counted in SQL rather than by measuring a page: a page is capped, so
+   * counting its rows silently reports 500 once there are more than that.
+   *
+   * @param {object} [options]
+   * @returns {Promise<number>}
+   */
+  async countStatusEvents({
+    pendingOnly = false, search = '', status = '', assignee = '',
+    delivery = 'all', channel = ''
+  } = {}) {
+    const params = [];
+    const where = [];
+
+    if (pendingOnly) where.push('notified_at IS NULL');
+
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(customer_name ILIKE $${params.length}
+                OR lead_number   ILIKE $${params.length}
+                OR source_name   ILIKE $${params.length}
+                OR assignee_name ILIKE $${params.length})`);
+    }
+
+    if (status) {
+      params.push(status);
+      where.push(`status_after = $${params.length}`);
+    }
+
+    if (assignee) {
+      params.push(assignee);
+      where.push(`assignee_name = $${params.length}`);
+    }
+
+    if (delivery === 'sent') where.push('notified_at IS NOT NULL');
+    if (delivery === 'open') where.push('notified_at IS NULL');
+
+    if (channel) {
+      params.push(channel);
+      where.push(`notified_via = $${params.length}`);
+    }
+
+    const { rows: [{ total }] } = await this.pool.query(
+      `SELECT count(*)::int AS total FROM status_events
+        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}`,
+      params);
+
+    return total;
   }
 
   /** Headline counts for the dashboard. */
@@ -935,6 +990,8 @@ export class Database {
       `SELECT count(*)::int AS total,
               count(*) FILTER (WHERE notified_at IS NULL)::int      AS open,
               count(*) FILTER (WHERE notified_at IS NOT NULL)::int  AS sent,
+              count(*) FILTER (WHERE notified_via = 'whatsapp')::int AS whatsapp,
+              count(*) FILTER (WHERE notified_via = 'email')::int    AS email,
               count(*) FILTER (WHERE source_state = 'resolved')::int AS resolved,
               count(*) FILTER (WHERE source_state IN ('pending', 'failed'))::int
                 AS unresolved,
@@ -1021,6 +1078,8 @@ export class Database {
    * @returns {Promise<{id: ?number, duplicate: boolean}>}
    */
   async recordWebhook(source, payload, externalId = null) {
+    payload = stripNullBytes(payload);
+
     const { rows } = await this.pool.query(
       `INSERT INTO webhook_events (source, external_id, payload)
        VALUES ($1, $2, $3)
@@ -1149,6 +1208,62 @@ function sourceColumns(columns) {
     source: columns?.source ?? '',
     sourceId: columns?.sourceId ?? 'sourceId'
   };
+}
+
+/**
+ * Coerces whatever a webhook called a timestamp into one we can store.
+ *
+ * Deliberately forgiving, unlike toTimestamp below. That one guards the sync,
+ * where a stamp without an offset is a bug worth stopping for. This one sits
+ * on the webhook path, where the sender is outside our control: a delivery
+ * with no date, a date in a shape nobody documented, or an outright bad one
+ * must still be recorded. Throwing here returns a 500, and Svix answers a 500
+ * by delivering the same event again, forever.
+ *
+ * Falls back to now, which is wrong by seconds; refusing the event is wrong
+ * by the whole event.
+ *
+ * @param {unknown} value
+ * @returns {Date}
+ */
+export function eventTimestamp(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    // Seconds and milliseconds are both seen in the wild; anything before
+    // 1973 in ms is far more likely to be seconds.
+    const date = new Date(value < 1e11 ? value * 1000 : value);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const date = new Date(value.trim());
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  return new Date();
+}
+
+/**
+ * Removes what Postgres cannot store in a JSONB column.
+ *
+ * A JSON string may contain \u0000; a Postgres jsonb value may not. One null
+ * byte anywhere in a delivery would make the insert throw, the endpoint
+ * answer 500, and the sender retry the identical body until it gives up.
+ *
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+export function stripNullBytes(value) {
+  if (typeof value === 'string') return value.replace(/\u0000/g, '');
+  if (Array.isArray(value)) return value.map(stripNullBytes);
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .map(([key, item]) => [key.replace(/\u0000/g, ''), stripNullBytes(item)]));
+  }
+
+  return value;
 }
 
 function toTimestamp(value) {

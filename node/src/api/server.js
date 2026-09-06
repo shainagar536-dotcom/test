@@ -16,7 +16,7 @@ import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
 import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
-import { SurenseClient } from '../surense.js';
+import { SurenseClient, tokenScopes } from '../surense.js';
 import { extractPairs, optionsFromSchema, scoreCatalog } from '../sources.js';
 import { EVENT_LABELS, describeEvent } from '../dashboard/labels.js';
 import { readFileSync } from 'node:fs';
@@ -44,6 +44,29 @@ export function secretsMatch(a, b) {
   }
 
   return timingSafeEqual(left, right);
+}
+
+/**
+ * The CRM settings in effect, with the credential masked.
+ *
+ * Enough to tell one client from another and one host from another, and not
+ * enough to authenticate with. The secret is never included at all.
+ *
+ * @param {object} config
+ * @returns {object}
+ */
+function crmSettings(config) {
+  const id = String(config.surense.clientId ?? '');
+
+  return {
+    clientId: id ? `${id.slice(0, 8)}…${id.slice(-4)} (${id.length} chars)` : null,
+    clientSecretSet: Boolean(config.surense.clientSecret),
+    tokenUrl: config.surense.tokenUrl,
+    apiBases: config.surense.apiBases,
+    sourceCatalogPath: config.sourceCatalogPath,
+    mirrorLeads: config.sync.mirrorLeads,
+    columns: config.messaging.columns
+  };
 }
 
 function send(response, status, body, headers = {}) {
@@ -583,7 +606,9 @@ export function createApi({ db, config, fetchImpl }) {
       search: url.searchParams.get('search') ?? '',
       status: url.searchParams.get('status') ?? '',
       assignee: url.searchParams.get('assignee') ?? '',
-      delivery: url.searchParams.get('delivery') ?? 'all'
+      delivery: url.searchParams.get('delivery') ?? 'all',
+      channel: url.searchParams.get('channel') ?? '',
+      sort: url.searchParams.get('sort') === 'asc' ? 'asc' : 'desc'
     });
 
     return {
@@ -685,6 +710,85 @@ export function createApi({ db, config, fetchImpl }) {
       : { status: 404, body: { error: 'No such source id.' } };
   });
 
+  // ------------------------------------------------------------------- crm
+  // What the service is pointed at, and whether it answers.
+  //
+  // Changing a host or a token path in the dashboard is only half the job;
+  // the other half is knowing it took. This reports the settings in effect
+  // and, on POST, actually authenticates and says what came back.
+  //
+  // The client id is masked and the secret is never returned — only whether
+  // one is set. A settings page that leaks the credential is not a settings
+  // page.
+  route('GET', /^\/api\/crm$/, async () => ({
+    settings: crmSettings(config),
+    note: 'POST here to authenticate and confirm these actually work.'
+  }));
+
+  route('POST', /^\/api\/crm$/, async () => {
+    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const settings = crmSettings(config);
+
+    let auth;
+
+    try {
+      const { token, scope } = await client.authenticate();
+
+      auth = {
+        ok: true,
+        // The scope the token really carries, which is not always the scope
+        // that was granted in the CRM's own UI — that gap is exactly what a
+        // 403 on a new endpoint turns out to be.
+        scope: scope || tokenScopes(token) || '(the token states no scope)',
+        error: null
+      };
+    } catch (error) {
+      return {
+        settings,
+        auth: { ok: false, scope: null, error: error.message, hint: error.hint || null },
+        apiBase: null,
+        sourceCatalog: null
+      };
+    }
+
+    let apiBase = null;
+    let apiError = null;
+
+    try {
+      apiBase = await client.resolveBase();
+    } catch (error) {
+      apiError = error.message;
+    }
+
+    // The one call the source mapping depends on. Read-only, and it is the
+    // call most likely to fail for want of a scope.
+    let sourceCatalog = null;
+
+    if (apiBase) {
+      try {
+        const pairs = await client.fetchSourceCatalog(config.sourceCatalogPath);
+
+        sourceCatalog = {
+          ok: true,
+          path: config.sourceCatalogPath,
+          sources: pairs.length,
+          example: pairs.length ? pairs[0].name : null,
+          error: null
+        };
+      } catch (error) {
+        sourceCatalog = {
+          ok: false,
+          path: config.sourceCatalogPath,
+          sources: 0,
+          example: null,
+          error: error.message
+        };
+      }
+    }
+
+    return { settings, auth, apiBase, apiError, sourceCatalog };
+  });
+
   // ----------------------------------------------------------------- admin
   // Empties the lead mirror. The status history is NOT touched — the database
   // refuses to delete it — so this clears the cache and keeps the record.
@@ -735,12 +839,18 @@ export function createApi({ db, config, fetchImpl }) {
       search: url.searchParams.get('search') ?? '',
       status: url.searchParams.get('status') ?? '',
       assignee: url.searchParams.get('assignee') ?? '',
-      delivery: url.searchParams.get('delivery') ?? 'all'
+      delivery: url.searchParams.get('delivery') ?? 'all',
+      channel: url.searchParams.get('channel') ?? ''
     };
+
+    // Newest first by default; the reader can flip it to walk forwards
+    // through what happened.
+    const sort = url.searchParams.get('sort') === 'asc' ? 'asc' : 'desc';
 
     const [events, counts, templates, recipientRows] = await Promise.all([
       db.listStatusEvents({
         ...query,
+        sort,
         limit: Number.isFinite(limit) ? limit : 50,
         offset: Number.isFinite(offset) ? offset : 0
       }),
@@ -765,6 +875,7 @@ export function createApi({ db, config, fetchImpl }) {
       total: await db.countStatusEvents(query),
       limit,
       offset,
+      sort,
       counts,
       recipients: recipientRows.length,
       redirectAllTo: config.messaging.redirectAllTo || null,
@@ -1030,6 +1141,15 @@ export function createApi({ db, config, fetchImpl }) {
       payload = rawBody.trim() ? JSON.parse(rawBody) : {};
     } catch {
       return { status: 400, body: { error: 'Body was not valid JSON.' } };
+    }
+
+    // Valid JSON is not necessarily an object: `null`, a number and a bare
+    // string all parse. The payload column is jsonb and NOT NULL, so storing
+    // one of those directly throws, the endpoint answers 500, and a 500 is
+    // how you ask the sender to deliver the identical body again. Wrapped, it
+    // is stored, reported as uninterpretable, and never retried.
+    if (!payload || typeof payload !== 'object') {
+      payload = { unexpectedBody: payload === undefined ? null : payload };
     }
 
     // The sender's own message id, so a retry of a delivery that failed once
