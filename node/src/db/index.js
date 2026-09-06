@@ -778,6 +778,235 @@ export class Database {
     return rowCount > 0;
   }
 
+  // ---------------------------------------------------------- status events
+  /**
+   * Records one status change.
+   *
+   * Written before anything is looked up, so a CRM that is slow or down costs
+   * an enrichment, never the event. A redelivery of the same change updates
+   * nothing and returns the row already held.
+   *
+   * @param {object} event
+   * @returns {Promise<{id: number, created: boolean}>}
+   */
+  async recordStatusEvent(event) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO status_events
+              (lead_id, lead_number, customer_name, status_before, status_after,
+               assignee_name, source_id, source_name, source_state, occurred_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (lead_id, status_before, status_after, occurred_at)
+       DO NOTHING
+       RETURNING id`,
+      [
+        event.leadId,
+        event.leadNumber ?? '',
+        event.customerName ?? '',
+        event.statusBefore ?? '',
+        event.statusAfter ?? '',
+        event.assigneeName ?? '',
+        event.sourceId ?? '',
+        event.sourceName ?? '',
+        event.sourceState ?? 'pending',
+        toTimestamp(event.occurredAt) ?? new Date()
+      ]);
+
+    if (rows.length) return { id: Number(rows[0].id), created: true };
+
+    // Already recorded. Return the row that exists so the caller can report
+    // the duplicate rather than treating it as a failure.
+    const { rows: existing } = await this.pool.query(
+      `SELECT id FROM status_events
+        WHERE lead_id = $1 AND status_before = $2
+          AND status_after = $3 AND occurred_at = $4`,
+      [event.leadId, event.statusBefore ?? '', event.statusAfter ?? '',
+        toTimestamp(event.occurredAt) ?? new Date()]);
+
+    return { id: existing.length ? Number(existing[0].id) : 0, created: false };
+  }
+
+  /**
+   * Fills in what the lookup found for an event.
+   *
+   * @param {number} id
+   * @param {object} patch
+   */
+  async enrichStatusEvent(id, patch) {
+    await this.pool.query(
+      `UPDATE status_events
+          SET assignee_name = coalesce(NULLIF($2, ''), assignee_name),
+              source_id     = coalesce(NULLIF($3, ''), source_id),
+              source_name   = coalesce(NULLIF($4, ''), source_name),
+              source_state  = $5,
+              source_error  = $6,
+              enrich_attempts = enrich_attempts + 1
+        WHERE id = $1`,
+      [id, patch.assigneeName ?? '', patch.sourceId ?? '', patch.sourceName ?? '',
+        patch.sourceState ?? 'pending', patch.sourceError ?? '']);
+  }
+
+  /**
+   * Events whose source has not been resolved yet.
+   *
+   * `failed` is included: a lookup that failed because the CRM was briefly
+   * unreachable should be retried, and capping the attempts is what stops an
+   * event that can never resolve from being retried forever.
+   *
+   * @param {object} [options]
+   * @returns {Promise<Array<object>>}
+   */
+  async pendingEnrichment({ limit = 25, maxAttempts = 5 } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM status_events
+        WHERE source_state IN ('pending', 'failed')
+          AND enrich_attempts < $2
+        ORDER BY id
+        LIMIT $1`,
+      [limit, maxAttempts]);
+
+    return rows;
+  }
+
+  /**
+   * The change feed the sender reads.
+   *
+   * @param {object} [options]
+   * @returns {Promise<Array<object>>}
+   */
+  async listStatusEvents({
+    limit = 100, offset = 0, pendingOnly = false, sinceId, search = '',
+    status = '', assignee = '', delivery = 'all'
+  } = {}) {
+    const params = [];
+    const where = [];
+
+    if (pendingOnly) where.push('notified_at IS NULL');
+
+    if (sinceId !== undefined) {
+      params.push(sinceId);
+      where.push(`id > $${params.length}`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(customer_name ILIKE $${params.length}
+                OR lead_number   ILIKE $${params.length}
+                OR source_name   ILIKE $${params.length}
+                OR assignee_name ILIKE $${params.length})`);
+    }
+
+    if (status) {
+      params.push(status);
+      where.push(`status_after = $${params.length}`);
+    }
+
+    if (assignee) {
+      params.push(assignee);
+      where.push(`assignee_name = $${params.length}`);
+    }
+
+    if (delivery === 'sent') where.push('notified_at IS NOT NULL');
+    if (delivery === 'open') where.push('notified_at IS NULL');
+
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    params.push(Math.min(Math.max(limit, 1), 500));
+    params.push(Math.max(offset, 0));
+
+    const { rows } = await this.pool.query(
+      `SELECT * FROM status_events
+        ${clause}
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params);
+
+    return rows;
+  }
+
+  /** @param {object} [options] */
+  async countStatusEvents(options = {}) {
+    const rows = await this.listStatusEvents({ ...options, limit: 500, offset: 0 });
+    return rows.length;
+  }
+
+  /** Headline counts for the dashboard. */
+  async statusEventCounts() {
+    const { rows: [counts] } = await this.pool.query(
+      `SELECT count(*)::int AS total,
+              count(*) FILTER (WHERE notified_at IS NULL)::int      AS open,
+              count(*) FILTER (WHERE notified_at IS NOT NULL)::int  AS sent,
+              count(*) FILTER (WHERE source_state = 'resolved')::int AS resolved,
+              count(*) FILTER (WHERE source_state IN ('pending', 'failed'))::int
+                AS unresolved,
+              count(DISTINCT lead_id)::int                          AS leads
+         FROM status_events`);
+
+    return counts;
+  }
+
+  /**
+   * Marks events as notified, claiming each exactly once.
+   *
+   * The WHERE on notified_at is what makes two senders running at the same
+   * time safe: each claims a disjoint set, so no message goes out twice.
+   *
+   * @param {Array<number>} ids
+   * @param {string} via
+   * @param {string} to
+   */
+  async markEventsNotified(ids, via = '', to = '') {
+    if (!ids.length) return { claimed: [], alreadyClaimed: [] };
+
+    const { rows } = await this.pool.query(
+      `UPDATE status_events
+          SET notified_at = now(), notified_via = $2, notified_to = $3
+        WHERE id = ANY($1) AND notified_at IS NULL
+        RETURNING id`,
+      [ids, via, to]);
+
+    const claimed = rows.map(row => Number(row.id));
+
+    return {
+      claimed,
+      alreadyClaimed: ids.filter(id => !claimed.includes(Number(id)))
+    };
+  }
+
+  /** Distinct values for the dashboard filters. */
+  async eventFilterValues() {
+    const { rows: statuses } = await this.pool.query(
+      `SELECT status_after AS value, count(*)::int AS leads
+         FROM status_events WHERE status_after <> ''
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 60`);
+
+    const { rows: assignees } = await this.pool.query(
+      `SELECT assignee_name AS value, count(*)::int AS leads
+         FROM status_events WHERE assignee_name <> ''
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 40`);
+
+    return { statuses, assignees };
+  }
+
+  /**
+   * Empties the operational mirror, leaving the history untouched.
+   *
+   * The lead mirror is a cache of the CRM and can be rebuilt at will; the
+   * status history cannot, so it is not in this list and the database refuses
+   * to delete it anyway.
+   *
+   * @returns {Promise<Record<string, number>>}
+   */
+  async resetMirror() {
+    const cleared = {};
+
+    for (const table of ['changes', 'leads', 'sync_runs', 'webhook_events', 'cursors']) {
+      const { rowCount } = await this.pool.query(`DELETE FROM ${table}`);
+      cleared[table] = rowCount;
+    }
+
+    return cleared;
+  }
+
   /**
    * Stores a webhook delivery exactly as received.
    *

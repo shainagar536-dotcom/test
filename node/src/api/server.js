@@ -10,15 +10,15 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { runSync, syncInProgress } from '../sync/run.js';
-import { buildOutbox, summarizeSkips } from '../notify/outbox.js';
+import { buildEventOutbox, summarizeSkips } from '../notify/outbox.js';
+import { enrichPending, refreshSourceCatalog } from '../events/enrich.js';
 import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
 import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
 import { SurenseClient } from '../surense.js';
 import { extractPairs, optionsFromSchema, scoreCatalog } from '../sources.js';
-import { describeLeads, labelMap } from '../dashboard/view.js';
-import { DEFAULT_COLUMNS, TECHNICAL } from '../dashboard/labels.js';
+import { EVENT_LABELS, describeEvent } from '../dashboard/labels.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,9 +243,7 @@ export function createApi({ db, config, fetchImpl }) {
   // template and its recipient, with the message already rendered. The
   // scheduled sender calls this, sends what it gets, and reports back.
   route('GET', /^\/api\/outbox$/, async (_request, _params, url) => {
-    const limit = Number(url.searchParams.get('limit') ?? 500);
-
-    const changes = await db.listChanges({ pendingOnly: true, limit });
+    const events = await db.listStatusEvents({ pendingOnly: true, limit: 500 });
 
     const templates = new Map((await db.listTemplates())
       .map(template => [normalizeText(template.status), template]));
@@ -260,15 +258,12 @@ export function createApi({ db, config, fetchImpl }) {
       ? { ...config.messaging, maxPerRun: override }
       : config.messaging;
 
-    const sourceNames = await db.sourceNameMap();
-
-    const { ready, skipped, floodBrake } = buildOutbox({
-      changes, templates, recipients, sourceNames,
-      columns: config.messaging.columns, messaging
+    const { ready, skipped, floodBrake } = buildEventOutbox({
+      events, templates, recipients, messaging
     });
 
     return {
-      pendingChanges: changes.length,
+      pendingEvents: events.length,
       readyToSend: ready.length,
       // Surfaced on every response so a redirect left on by accident is
       // impossible to miss, and one left off before going live is obvious.
@@ -574,93 +569,68 @@ export function createApi({ db, config, fetchImpl }) {
     };
   });
 
-  // ------------------------------------------------------------- dashboard
-  // The page itself carries no data — it is an empty shell that asks for the
-  // token and then calls the authenticated endpoints below. That is why it
-  // can be served unauthenticated: there is nothing in it to leak, and a
-  // token in a URL would end up in browser history and proxy logs.
-  route('GET', /^\/(dashboard|dashboard\/)?$/, async () => ({
-    status: 200,
-    body: DASHBOARD_HTML,
-    headers: { 'Content-Type': 'text/html; charset=utf-8' }
-  }), { auth: false });
+  // ---------------------------------------------------------------- events
+  // The status-change log: the record this service keeps. One row per change,
+  // carrying the customer, the move, who handles it and who referred them.
+  route('GET', /^\/api\/events$/, async (_request, _params, url) => {
+    const sinceId = url.searchParams.get('sinceId');
 
-  // What the filters offer, and how to say each field key in Hebrew.
-  route('GET', /^\/api\/dashboard\/filters$/, async () => {
-    const [sample] = await db.listLeads({ limit: 1 });
-    const keys = sample ? Object.keys(sample.fields) : [];
-
-    // Plumbing is offered but not shown by default — a tenant id on every row
-    // is a column that costs width and tells the reader nothing.
-    const columns = keys.filter(key => !TECHNICAL.has(key));
-
-    return {
-      columns: [...columns, ...keys.filter(key => TECHNICAL.has(key))],
-      defaultColumns: DEFAULT_COLUMNS.filter(key => keys.includes(key)),
-      labels: labelMap(keys),
-      statuses: await db.distinctFieldValues(config.messaging.columns.status, 60),
-      assignees: await db.distinctFieldValues('assigneeName', 40)
-    };
-  });
-
-  // One page of leads, translated, with whether each has been notified.
-  route('GET', /^\/api\/dashboard\/leads$/, async (_request, _params, url) => {
-    const columns = config.messaging.columns;
-
-    const limit = Number(url.searchParams.get('limit') ?? 50);
-    const offset = Number(url.searchParams.get('offset') ?? 0);
-
-    const { rows, total } = await db.listLeadsForDashboard({
-      columns,
-      limit: Number.isFinite(limit) ? limit : 50,
-      offset: Number.isFinite(offset) ? offset : 0,
+    const events = await db.listStatusEvents({
+      limit: Number(url.searchParams.get('limit') ?? 100),
+      offset: Number(url.searchParams.get('offset') ?? 0),
+      pendingOnly: url.searchParams.get('pending') === 'true',
+      sinceId: sinceId === null ? undefined : Number(sinceId),
       search: url.searchParams.get('search') ?? '',
       status: url.searchParams.get('status') ?? '',
       assignee: url.searchParams.get('assignee') ?? '',
       delivery: url.searchParams.get('delivery') ?? 'all'
     });
 
-    const ids = rows.map(row => row.id);
+    return {
+      count: events.length,
+      nextCursor: events.length ? Math.max(...events.map(e => Number(e.id))) : 0,
+      counts: await db.statusEventCounts(),
+      events
+    };
+  });
 
-    const [pending, lastSend, templates, recipientRows, sourceNames, counts, unresolved] =
-      await Promise.all([
-        db.pendingChangesForLeads(ids, columns.status),
-        db.lastSendForLeads(ids, columns.status),
-        db.listTemplates(),
-        db.listRecipients(),
-        db.sourceNameMap(),
-        db.deliveryCounts(columns.status),
-        db.listUnresolvedSources(columns)
-      ]);
+  // Looks up the source for events that arrived without one. Safe to call
+  // repeatedly and safe to schedule: it only touches rows still waiting.
+  route('POST', /^\/api\/events\/enrich$/, async (_request, _params, url) => {
+    const client = new SurenseClient({ ...config.surense, fetchImpl });
 
-    const leads = describeLeads({
-      leads: rows,
-      pending,
-      lastSend,
-      templates: new Map(templates.map(row => [normalizeText(row.status), row])),
-      recipients: new Map(recipientRows.map(row => [row.source_key, row])),
-      sourceNames,
-      columns,
-      messaging: config.messaging
+    return enrichPending({
+      db, client, config,
+      limit: Number(url.searchParams.get('limit') ?? 25)
+    });
+  });
+
+  // Claims events as sent. Two senders running at once get disjoint sets, so
+  // no message goes out twice.
+  route('POST', /^\/api\/events\/notified$/, async request => {
+    const body = await readJsonBody(request);
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
+
+    if (!ids.length) {
+      return { status: 400, body: { error: 'Send {"ids": [1, 2, 3]}.' } };
+    }
+
+    const { claimed, alreadyClaimed } = await db.markEventsNotified(
+      ids, String(body.via ?? ''), String(body.to ?? ''));
+
+    return { requested: ids.length, claimed, alreadyClaimed };
+  });
+
+  // Reloads the whole id -> name catalog in one call. This is the endpoint
+  // that fills in every source name at once.
+  route('POST', /^\/api\/sources\/refresh$/, async () => {
+    const client = new SurenseClient({ ...config.surense, fetchImpl });
+
+    const result = await refreshSourceCatalog({
+      db, client, path: config.sourceCatalogPath
     });
 
-    return {
-      total,
-      limit,
-      offset,
-      leads,
-      summary: {
-        leads: counts.leads,
-        openLeads: counts.open_leads,
-        openChanges: counts.open_changes,
-        sentLeads: counts.sent_leads,
-        sentChanges: counts.sent_changes,
-        recipients: recipientRows.length,
-        unresolvedSources: unresolved.length,
-        unresolvedLeads: unresolved.reduce((sum, row) => sum + row.leads, 0),
-        redirectAllTo: config.messaging.redirectAllTo || null
-      }
-    };
+    return { ...result, path: config.sourceCatalogPath };
   });
 
   // ----------------------------------------------------------- source names
@@ -675,8 +645,7 @@ export function createApi({ db, config, fetchImpl }) {
       total: map.length,
 
       // The worklist: ids the leads actually use that are still unnamed,
-      // busiest first. Naming these in order is the shortest route to a
-      // working send path.
+      // busiest first.
       unresolvedInUse: sources
         .filter(source => !source.resolved)
         .slice(0, 50)
@@ -714,6 +683,93 @@ export function createApi({ db, config, fetchImpl }) {
     return removed
       ? { deleted: true }
       : { status: 404, body: { error: 'No such source id.' } };
+  });
+
+  // ----------------------------------------------------------------- admin
+  // Empties the lead mirror. The status history is NOT touched — the database
+  // refuses to delete it — so this clears the cache and keeps the record.
+  //
+  // Guarded by an explicit confirmation rather than a bare POST, because a
+  // stray call would otherwise throw away every stored lead.
+  route('POST', /^\/api\/admin\/reset-mirror$/, async (_request, _params, url) => {
+    if (url.searchParams.get('confirm') !== 'delete-mirror') {
+      return { status: 400, body: {
+        error: 'Add ?confirm=delete-mirror to confirm.',
+        note: 'This clears the lead mirror. status_events is never touched.'
+      } };
+    }
+
+    const cleared = await db.resetMirror();
+
+    return {
+      cleared,
+      historyKept: (await db.statusEventCounts()).total,
+      note: 'The lead mirror is empty. The status history is untouched.'
+    };
+  });
+
+  // ------------------------------------------------------------- dashboard
+  // The page itself carries no data — it is an empty shell that asks for the
+  // token and then calls the authenticated endpoints below. That is why it
+  // can be served unauthenticated: there is nothing in it to leak, and a
+  // token in a URL would end up in browser history and proxy logs.
+  route('GET', /^\/(dashboard|dashboard\/)?$/, async () => ({
+    status: 200,
+    body: DASHBOARD_HTML,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+  }), { auth: false });
+
+  // What the filters offer, and how to say each column in Hebrew.
+  route('GET', /^\/api\/dashboard\/filters$/, async () => {
+    const { statuses, assignees } = await db.eventFilterValues();
+
+    return { statuses, assignees, labels: EVENT_LABELS };
+  });
+
+  // The status-change log, translated, with whether a message has gone out.
+  route('GET', /^\/api\/dashboard\/events$/, async (_request, _params, url) => {
+    const limit = Number(url.searchParams.get('limit') ?? 50);
+    const offset = Number(url.searchParams.get('offset') ?? 0);
+
+    const query = {
+      search: url.searchParams.get('search') ?? '',
+      status: url.searchParams.get('status') ?? '',
+      assignee: url.searchParams.get('assignee') ?? '',
+      delivery: url.searchParams.get('delivery') ?? 'all'
+    };
+
+    const [events, counts, templates, recipientRows] = await Promise.all([
+      db.listStatusEvents({
+        ...query,
+        limit: Number.isFinite(limit) ? limit : 50,
+        offset: Number.isFinite(offset) ? offset : 0
+      }),
+      db.statusEventCounts(),
+      db.listTemplates(),
+      db.listRecipients()
+    ]);
+
+    // The same decision the sender makes, so the screen cannot claim a
+    // message is queued while the sender skips it.
+    const { ready, skipped } = buildEventOutbox({
+      events,
+      templates: new Map(templates.map(row => [normalizeText(row.status), row])),
+      recipients: new Map(recipientRows.map(row => [row.source_key, row])),
+      messaging: { ...config.messaging, maxPerRun: Number.MAX_SAFE_INTEGER }
+    });
+
+    const sendable = new Set(ready.map(item => item.eventId));
+    const reasons = new Map(skipped.map(item => [item.eventId, item.reason]));
+
+    return {
+      total: await db.countStatusEvents(query),
+      limit,
+      offset,
+      counts,
+      recipients: recipientRows.length,
+      redirectAllTo: config.messaging.redirectAllTo || null,
+      events: events.map(event => describeEvent(event, sendable, reasons))
+    };
   });
 
   // --------------------------------------------------------------- columns
@@ -993,9 +1049,10 @@ export function createApi({ db, config, fetchImpl }) {
 
     try {
       outcome = await recordDelivery({
-        db, payload,
-        columns: config.messaging.columns,
-        timeZone: config.sync.timeZone
+        db,
+        payload,
+        config,
+        client: new SurenseClient({ ...config.surense, fetchImpl })
       });
     } catch (error) {
       // The delivery is stored either way, so it can be replayed once the
@@ -1007,7 +1064,7 @@ export function createApi({ db, config, fetchImpl }) {
     }
 
     await db.finishWebhook(stored.id,
-      outcome.recorded ? `recorded change ${outcome.changeIds.join(',')}` : outcome.reason);
+      outcome.recorded ? `recorded event ${outcome.eventId}` : outcome.reason);
 
     return {
       received: true,
@@ -1016,7 +1073,19 @@ export function createApi({ db, config, fetchImpl }) {
       eventType: payload.eventType ?? payload.type ?? null,
       recorded: outcome.recorded,
       reason: outcome.reason,
-      changeIds: outcome.changeIds,
+      eventId: outcome.eventId,
+      duplicate: outcome.duplicate,
+
+      // What the lookup found, so a delivery that recorded but could not be
+      // enriched says so here rather than looking like a clean success.
+      source: outcome.enriched
+        ? {
+          state: outcome.enriched.sourceState,
+          name: outcome.enriched.sourceName ?? null,
+          error: outcome.enriched.sourceError || null
+        }
+        : null,
+
       statusChange: outcome.event
         ? `${outcome.event.statusBefore} -> ${outcome.event.statusAfter}`
         : null

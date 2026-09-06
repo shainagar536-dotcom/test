@@ -168,13 +168,28 @@ export function loadConfig() {
 
       // Refuse to act on a read that returned fewer leads than this fraction
       // of what is already stored — see sync/run.js.
-      shrinkGuard: number('SHRINK_GUARD', 0.5)
+      shrinkGuard: number('SHRINK_GUARD', 0.5),
+
+      // Mirror every lead into Postgres on each sync.
+      //
+      // Off by default. What the service needs is the status changes and the
+      // source behind them — both of which arrive by webhook and are read
+      // back per event — not a copy of three thousand lead rows kept fresh by
+      // a full read of the CRM every hour. Turn it on to get /api/leads and
+      // the lead-level dashboard back.
+      mirrorLeads: optional('MIRROR_LEADS', 'false') === 'true'
     },
+
+    // The catalog of referring sources: every source by id and name, in one
+    // call. Confirmed against the live CRM — and the name arrives under
+    // `title`, not `name`.
+    sourceCatalogPath: optional('SOURCE_CATALOG_PATH', '/customers/sources'),
 
     // Read-only lookups tried when hunting for the source catalog. Order is
     // most to least likely; each is scored against real lead traffic rather
     // than trusted for answering at all.
     sourceCatalogPaths: optional('SOURCE_CATALOG_PATHS', [
+      '/customers/sources',
       '/leads/sources',
       '/sources',
       '/leadsources',
@@ -204,7 +219,11 @@ export function loadConfig() {
         sourceId: optional('SOURCE_ID_COLUMN', 'sourceId'),
 
         clientName: optional('CLIENT_NAME_COLUMN', 'fullName'),
-        leadNumber: optional('LEAD_NUMBER_COLUMN', 'number')
+        leadNumber: optional('LEAD_NUMBER_COLUMN', 'number'),
+
+        // Who in the CRM handles the lead. Arrives with the lead already
+        // named, unlike the source, so it needs no lookup of its own.
+        assignee: optional('ASSIGNEE_COLUMN', 'assigneeName')
       },
 
       subject: multiline('MESSAGE_SUBJECT', 'עדכון סטטוס ליד — {client}'),

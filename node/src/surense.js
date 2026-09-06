@@ -206,6 +206,89 @@ export class SurenseClient {
   }
 
   /**
+   * The referring-source catalog: every source, by id and name.
+   *
+   * `/customers/sources` is the path that actually serves this — confirmed
+   * against the live CRM, not guessed. The name arrives under `title`, not
+   * `name`: looking for `name` returns a row with no name at all and the
+   * mapping silently stays empty, which is exactly the trap this comment
+   * exists to stop the next reader falling into.
+   *
+   * One call returns all of them, so a lead's source costs no request of its
+   * own — the catalog is fetched once and cached in the `sources` table.
+   *
+   * @param {string} [path]
+   * @returns {Promise<Array<{id: string, name: string}>>}
+   */
+  async fetchSourceCatalog(path = '/customers/sources') {
+    await this.resolveBase();
+
+    return extractRows(await this.request('GET', path))
+      .map(row => {
+        const id = row?.id ?? row?.sourceId ?? row?.value;
+        const name = row?.title ?? row?.name ?? row?.label ?? row?.sourceName;
+
+        return id && name ? { id: String(id), name: String(name) } : null;
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * One lead, by its id.
+   *
+   * A webhook carries the status change but not the referring source, so the
+   * lead has to be read back for its `sourceId`. Which call does that is not
+   * documented, so each candidate is tried once and the one that answers is
+   * remembered — every later lookup then costs a single request.
+   *
+   * @param {string} leadId
+   * @returns {Promise<?object>}
+   */
+  async fetchLeadById(leadId) {
+    await this.resolveBase();
+
+    const attempts = this.leadLookup
+      ? [this.leadLookup]
+      : [
+        // A filtered search: the CRM confirmed filters work, and this is one
+        // request rather than paging the whole table.
+        { kind: 'search', field: 'id' },
+        { kind: 'get', path: `/leads/${encodeURIComponent(leadId)}` }
+      ];
+
+    const failures = [];
+
+    for (const attempt of attempts) {
+      try {
+        const lead = attempt.kind === 'get'
+          ? await this.request('GET', `/leads/${encodeURIComponent(leadId)}`)
+          : extractRows(await this.request('POST', '/leads/search', {
+            startRow: 0,
+            endRow: 1,
+            filters: [{ field: attempt.field, operator: 'equals', value: leadId }]
+          }))[0];
+
+        // A call that answers 200 with the wrong lead — or none — is not a
+        // working lookup, and remembering it would break every later one.
+        const found = lead?.fields ?? lead;
+        if (!found || (found.id && String(found.id) !== String(leadId))) {
+          failures.push(`${attempt.kind}: no matching lead returned`);
+          continue;
+        }
+
+        this.leadLookup = attempt;
+        return found;
+      } catch (error) {
+        failures.push(`${attempt.kind}: ${error.message}`);
+      }
+    }
+
+    throw new SurenseError(
+      `Could not read lead ${leadId}.\n  ${failures.join('\n  ')}`,
+      { hint: 'Check that this client may read a single lead.' });
+  }
+
+  /**
    * Looks for a lookup that lists the referring sources by id and name.
    *
    * Which path serves it is genuinely unknown — it is not in the integration

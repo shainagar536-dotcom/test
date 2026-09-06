@@ -22,13 +22,16 @@ const COLUMNS = { status: 'סטטוס', source: 'מקור מפנה',
   clientName: 'שם הלקוח', leadNumber: 'מספר ליד' };
 
 const config = {
-  surense: { clientId: 'x', clientSecret: 'y', tokenUrl: 'https://crm.test/t',
+  surense: { clientId: 'x', clientSecret: 'y', tokenUrl: 'https://crm.test/oauth/token',
     apiBases: ['https://crm.test/api/v1'], pageSize: 50, maxPages: 40 },
   database: { url: DATABASE_URL, ssl: false, maxConnections: 4 },
   api: { port: 0, token: 'api-token', webhookSecret: 'hook', svixSecret: SIGNING_SECRET },
   sync: { timeZone: 'Asia/Jerusalem', idKey: 'id', activeDays: [0], activeHours: [8],
-    shrinkGuard: 0.5 },
-  messaging: { columns: COLUMNS, subject: 'ליד {client}',
+    shrinkGuard: 0.5, mirrorLeads: false },
+  sourceCatalogPath: '/customers/sources',
+  sourceCatalogPaths: [],
+  messaging: { columns: { ...COLUMNS, sourceId: 'sourceId', assignee: 'assigneeName' },
+    subject: 'ליד {client}',
     body: 'שלום {source}, סטטוס: {message}', signature: 'בברכה',
     maxPerRun: 25, redirectAllTo: '' }
 };
@@ -64,6 +67,37 @@ const delivery = (overrides = {}) => ({
   ...overrides
 });
 
+const SOURCE_ID = '40db82e8-891c-4eaa-a449-5c1f69e0474e';
+const SOURCE_TITLE = 'סו"ב רועי כץ';
+
+/** Answers the three calls the enrichment path makes, and nothing else. */
+const crm = async (url, options = {}) => {
+  const path = String(url);
+  const json = (body, status = 200) => new Response(JSON.stringify(body), {
+    status, headers: { 'Content-Type': 'application/json' }
+  });
+
+  if (path.includes('/oauth/token')) {
+    return json({ access_token: 'tok', expires_in: 3600 });
+  }
+
+  if (path.includes('/leads/fields')) return json([]);
+
+  // The catalog names a source under `title`, as the live CRM does.
+  if (path.includes('/customers/sources')) {
+    return json([{ id: SOURCE_ID, title: SOURCE_TITLE }]);
+  }
+
+  if (path.includes('/leads/search') && options.method === 'POST') {
+    return json({ rows: [{
+      id: LEAD_ID, fullName: 'רועי סלאח', number: '3500',
+      statusName: 'לא ענה', assigneeName: 'שי נגר', sourceId: SOURCE_ID
+    }] });
+  }
+
+  return json({ error: 'unexpected ' + path }, 404);
+};
+
 function sign(body, id = `msg_${randomBytes(8).toString('hex')}`) {
   const ts = Math.floor(Date.now() / 1000);
   const key = Buffer.from(SIGNING_SECRET.replace(/^whsec_/, ''), 'base64');
@@ -81,7 +115,9 @@ let db, server, baseUrl;
 before(async () => {
   db = new Database(config.database);
   await db.migrate();
-  server = createApi({ db, config });
+  // A stub CRM: enrichment reads the lead back and then the source catalog,
+  // and both have to answer for the webhook path to complete.
+  server = createApi({ db, config, fetchImpl: crm });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
@@ -89,7 +125,12 @@ before(async () => {
 after(async () => { server?.close(); await db?.close(); });
 
 beforeEach(async () => {
-  await db.pool.query('TRUNCATE leads, changes, webhook_events, templates, recipients, source_names, sources');
+  await db.pool.query('TRUNCATE leads, changes, webhook_events, templates, ' +
+    'recipients, source_names, sources');
+
+  // History is append-only; clearing it between tests has to say so.
+  await db.pool.query("BEGIN; SET LOCAL app.allow_history_delete = 'on'; " +
+    'DELETE FROM status_events; COMMIT;');
 });
 
 const send = (payload, id) => {
@@ -206,9 +247,7 @@ test('a diff at the top level, with no wrapper, still works', () => {
 });
 
 // ------------------------------------------------------------- end to end
-test('a delivery records a change against the stored lead', async () => {
-  await seedLead();
-
+test('a delivery is recorded as a status event', async () => {
   const response = await send(delivery());
   assert.equal(response.status, 200);
 
@@ -216,31 +255,33 @@ test('a delivery records a change against the stored lead', async () => {
   assert.equal(body.recorded, true);
   assert.equal(body.statusChange, 'חדש -> לא ענה');
 
-  const { rows } = await db.pool.query('SELECT * FROM changes');
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].column_name, COLUMNS.status);
-  assert.equal(rows[0].before_value, 'חדש');
-  assert.equal(rows[0].after_value, 'לא ענה');
+  const [event] = await db.listStatusEvents({});
+
+  assert.equal(event.customer_name, 'רועי סלאח');
+  assert.equal(event.status_before, 'חדש');
+  assert.equal(event.status_after, 'לא ענה');
 
   // The event's own timestamp, not the moment of delivery.
-  assert.equal(rows[0].occurred_at.toISOString().slice(0, 19),
-    '2026-09-04T13:25:41');
+  assert.equal(event.occurred_at.toISOString().slice(0, 19), '2026-09-04T13:25:41');
 });
 
-test('the stored lead moves to the new status', async () => {
-  await seedLead('חדש');
-  await send(delivery());
+test('a lead the service has never stored is still recorded in full', async () => {
+  // This is the change that matters: the old path needed the lead to be in
+  // the mirror first, so on an empty database every delivery was dropped.
+  assert.equal(await db.countLeads(), 0);
 
-  const lead = await db.getLead(LEAD_ID);
+  const body = await (await send(delivery())).json();
 
-  // Without this the next poll would compare against the old value and record
-  // the identical change a second time.
-  assert.equal(lead.fields[COLUMNS.status], 'לא ענה');
-  assert.equal(lead.change_type, 'עודכן');
+  assert.equal(body.recorded, true);
+  assert.equal(body.source.state, 'resolved');
+  assert.equal(body.source.name, SOURCE_TITLE);
+
+  const [event] = await db.listStatusEvents({});
+  assert.equal(event.source_name, SOURCE_TITLE);
+  assert.equal(event.assignee_name, 'שי נגר');
 });
 
 test('a retried delivery is not recorded twice', async () => {
-  await seedLead();
   const messageId = 'msg_the_same_one';
 
   const first = await (await send(delivery(), messageId)).json();
@@ -250,20 +291,17 @@ test('a retried delivery is not recorded twice', async () => {
   const second = await (await send(delivery(), messageId)).json();
   assert.equal(second.duplicate, true);
 
-  const { rows } = await db.pool.query('SELECT count(*)::int AS n FROM changes');
-  assert.equal(rows[0].n, 1, 'a retry must not notify the source twice');
+  assert.equal((await db.statusEventCounts()).total, 1,
+    'a retry must not notify the source twice');
 });
 
-test('a lead the sync has not seen is reported, not failed', async () => {
-  const response = await send(delivery());
+test('the same change arriving under a new message id is still one event', async () => {
+  await send(delivery(), 'msg_one');
+  await send(delivery(), 'msg_two');
 
-  // 200 on purpose: retrying will not help until a sync runs, and a 4xx
-  // would have Surense retry it repeatedly for nothing.
-  assert.equal(response.status, 200);
-
-  const body = await response.json();
-  assert.equal(body.recorded, false);
-  assert.match(body.reason, /not in the database yet/);
+  // Deduplication cannot rely on the sender's id alone: identity is the
+  // change itself — this lead, this move, at this moment.
+  assert.equal((await db.statusEventCounts()).total, 1);
 });
 
 test('the delivery is stored even when nothing is recorded', async () => {
@@ -278,12 +316,10 @@ test('the delivery is stored even when nothing is recorded', async () => {
   assert.match(events[0].result, /not a lead update/);
 });
 
-test('a recorded change reaches the outbox as a real message', async () => {
-  await seedLead('חדש', 'מטאור - אריאל');
-
+test('a recorded event reaches the outbox as a real message', async () => {
   await db.saveTemplate({ status: 'לא ענה', message: 'ניסינו ליצור קשר אין מענה 1' });
-  await db.saveRecipient({ sourceKey: 'מטאור - אריאל', sourceName: 'מטאור - אריאל',
-    email: 'ariel@example.com' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com' });
 
   await send(delivery());
 
@@ -291,7 +327,7 @@ test('a recorded change reaches the outbox as a real message', async () => {
     { headers: { Authorization: `Bearer ${config.api.token}` } })).json();
 
   assert.equal(outbox.readyToSend, 1);
-  assert.equal(outbox.messages[0].to, 'ariel@example.com');
+  assert.equal(outbox.messages[0].to, 'roi@example.com');
   assert.equal(outbox.messages[0].status, 'לא ענה');
   assert.match(outbox.messages[0].body, /אין מענה 1/);
 });

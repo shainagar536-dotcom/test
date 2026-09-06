@@ -28,7 +28,11 @@ export const SKIP = {
   unmappedSource: 'source-id-not-mapped',
   noRecipient: 'source-not-in-recipients',
   recipientOff: 'recipient-inactive',
-  noAddress: 'recipient-has-no-address'
+  noAddress: 'recipient-has-no-address',
+
+  // The event is recorded but its source has not been looked up yet. Not a
+  // reason to send nothing forever — a reason to wait for the enrichment pass.
+  sourcePending: 'source-not-looked-up-yet'
 };
 
 /**
@@ -194,4 +198,118 @@ export function summarizeSkips(skipped) {
   }
 
   return summary;
+}
+
+
+/**
+ * Decides what to send for a set of recorded status events.
+ *
+ * The event already carries the customer, the move and the referring source,
+ * because the enrichment pass resolved it when the event arrived. So unlike
+ * the lead-mirror path this needs no lead table at all: everything the
+ * decision depends on is on the row.
+ *
+ * @param {object} input
+ * @param {Array<object>} input.events        Rows from listStatusEvents.
+ * @param {Map<string, object>} input.templates    Keyed by normalized status.
+ * @param {Map<string, object>} input.recipients   Keyed by normalized source.
+ * @param {object} input.messaging
+ * @returns {{ready: Array<object>, skipped: Array<object>, floodBrake: ?object}}
+ */
+export function buildEventOutbox({ events, templates, recipients, messaging }) {
+  const ready = [];
+  const skipped = [];
+
+  for (const event of events) {
+    const status = event.status_after ?? '';
+    const template = templates.get(normalizeText(status));
+
+    const skip = (reason, detail) => skipped.push({
+      eventId: Number(event.id),
+      leadId: event.lead_id,
+      customer: event.customer_name,
+      status,
+      reason,
+      detail: detail ?? null
+    });
+
+    // The closed allowlist: a status nobody has written wording for sends
+    // nothing, which keeps the statuses still being decided quiet rather than
+    // guessing at a message.
+    if (!template) { skip(SKIP.noTemplate); continue; }
+    if (!template.active) { skip(SKIP.templateOff); continue; }
+
+    if (event.source_state === 'absent') { skip(SKIP.noSource); continue; }
+
+    if (event.source_state !== 'resolved' || !event.source_name) {
+      // Distinguishing "not looked up yet" from "looked up, no such source"
+      // is what separates a queue that is moving from one that is stuck.
+      skip(event.source_state === 'failed' ? SKIP.unknownSource : SKIP.sourcePending,
+        event.source_id || null);
+      continue;
+    }
+
+    const recipient = recipients.get(normalizeText(event.source_name));
+
+    // Many sources are categories rather than people — a campaign, a
+    // friend-referral bucket. Those are meant to be skipped quietly.
+    if (!recipient) { skip(SKIP.noRecipient, event.source_name); continue; }
+    if (!recipient.active) { skip(SKIP.recipientOff, event.source_name); continue; }
+
+    const address = template.channel === 'whatsapp' ? recipient.whatsapp : recipient.email;
+    if (!address) { skip(SKIP.noAddress, event.source_name); continue; }
+
+    const values = {
+      status,
+      statusBefore: event.status_before ?? '',
+      message: template.message,
+      source: recipient.source_name,
+      client: event.customer_name ?? '',
+      leadNumber: event.lead_number || event.lead_id,
+      assignee: event.assignee_name ?? '',
+      signature: messaging.signature
+    };
+
+    const redirected = Boolean(messaging.redirectAllTo);
+
+    ready.push({
+      eventId: Number(event.id),
+      leadId: event.lead_id,
+      channel: template.channel,
+      to: redirected ? messaging.redirectAllTo : address,
+      intendedFor: redirected ? address : null,
+      redirected,
+      recipient: recipient.source_name,
+      customer: event.customer_name,
+      assignee: event.assignee_name,
+      status,
+      statusBefore: event.status_before ?? '',
+      subject: redirected
+        ? `[פיילוט → ${address}] ${render(messaging.subject, values)}`
+        : render(messaging.subject, values),
+      body: render(messaging.body, values),
+      occurredAt: event.occurred_at
+    });
+  }
+
+  // The flood brake. A bulk status edit in the CRM would otherwise fire one
+  // real message per lead, and none of them can be recalled.
+  if (ready.length > messaging.maxPerRun) {
+    return {
+      ready: [],
+      skipped,
+      floodBrake: {
+        blocked: ready.length,
+        limit: messaging.maxPerRun,
+        statuses: [...new Set(ready.map(item => item.status))],
+        message:
+          `${ready.length} messages were queued in one run, above the limit ` +
+          `of ${messaging.maxPerRun}. Nothing is being released. Review the ` +
+          'CRM for a bulk edit, then raise MAX_SENDS_PER_RUN for one run or ' +
+          'mark the events as notified to discard them.'
+      }
+    };
+  }
+
+  return { ready, skipped, floodBrake: null };
 }

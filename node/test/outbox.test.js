@@ -64,6 +64,10 @@ after(async () => {
 beforeEach(async () => {
   await db.pool.query(
     'TRUNCATE leads, changes, templates, recipients, source_names, sources, cursors');
+
+  // History is append-only; clearing it in a test has to say so.
+  await db.pool.query("BEGIN; SET LOCAL app.allow_history_delete = 'on'; " +
+    'DELETE FROM status_events; COMMIT;');
 });
 
 const call = (path, options = {}) => fetch(`${baseUrl}${path}`, {
@@ -193,13 +197,14 @@ test('a mapping is saved, listed and used by the outbox', async () => {
     email: 'ariel@example.com'
   });
 
-  await seedLead('לא ענה');
-
-  await db.pool.query(
-    `INSERT INTO changes
-       (lead_id, change_type, column_name, before_value, after_value, occurred_at)
-     VALUES ('ld_1', 'עודכן', $1, 'חדש', 'לא ענה', now())`,
-    [COLUMNS.status]);
+  // The outbox reads the status log, and the log carries the resolved source
+  // on the row itself.
+  await db.recordStatusEvent({
+    leadId: 'ld_1', customerName: 'דנה כהן', leadNumber: '8801',
+    statusBefore: 'חדש', statusAfter: 'לא ענה',
+    sourceId: SOURCE_ID, sourceName: 'מטאור - אריאל', sourceState: 'resolved',
+    occurredAt: new Date().toISOString()
+  });
 
   const outbox = await (await call('/api/outbox')).json();
 
@@ -489,21 +494,12 @@ test('the outbox renders a full message end to end', async () => {
       email: 'ariel@example.com' })
   });
 
-  await db.pool.query(
-    `INSERT INTO leads (id, fields, hash, changed_at, change_type)
-     VALUES ('ld_1', $1, 'h', now(), 'עודכן')`,
-    [JSON.stringify({
-      [COLUMNS.status]: 'לא עונה 3',
-      [COLUMNS.source]: 'מטאור - אריאל יואב דביר',
-      [COLUMNS.clientName]: 'דנה כהן',
-      [COLUMNS.leadNumber]: '8801'
-    })]);
-
-  await db.pool.query(
-    `INSERT INTO changes (lead_id, change_type, column_name,
-       before_value, after_value, occurred_at)
-     VALUES ('ld_1', 'עודכן', $1, 'לא עונה 2', 'לא עונה 3', now())`,
-    [COLUMNS.status]);
+  await db.recordStatusEvent({
+    leadId: 'ld_1', customerName: 'דנה כהן', leadNumber: '8801',
+    statusBefore: 'לא עונה 2', statusAfter: 'לא עונה 3',
+    sourceName: 'מטאור - אריאל יואב דביר', sourceState: 'resolved',
+    occurredAt: new Date().toISOString()
+  });
 
   const outbox = await (await call('/api/outbox')).json();
 
@@ -525,24 +521,19 @@ test('a message leaves the outbox once it is claimed', async () => {
     body: JSON.stringify({ sourceName: 'מקור', email: 'a@b.c' })
   });
 
-  await db.pool.query(
-    `INSERT INTO leads (id, fields, hash, changed_at, change_type)
-     VALUES ('ld_1', $1, 'h', now(), 'עודכן')`,
-    [JSON.stringify({ [COLUMNS.status]: 'לא ענה', [COLUMNS.source]: 'מקור',
-      [COLUMNS.clientName]: 'דנה', [COLUMNS.leadNumber]: '1' })]);
-
-  await db.pool.query(
-    `INSERT INTO changes (lead_id, change_type, column_name,
-       before_value, after_value, occurred_at)
-     VALUES ('ld_1', 'עודכן', $1, 'חדש', 'לא ענה', now())`,
-    [COLUMNS.status]);
+  await db.recordStatusEvent({
+    leadId: 'ld_1', customerName: 'דנה', leadNumber: '1',
+    statusBefore: 'חדש', statusAfter: 'לא ענה',
+    sourceName: 'מקור', sourceState: 'resolved',
+    occurredAt: new Date().toISOString()
+  });
 
   const first = await (await call('/api/outbox')).json();
   assert.equal(first.readyToSend, 1);
 
-  await call('/api/changes/notified', {
+  await call('/api/events/notified', {
     method: 'POST',
-    body: JSON.stringify({ ids: [first.messages[0].changeId], via: 'email' })
+    body: JSON.stringify({ ids: [first.messages[0].eventId], via: 'email' })
   });
 
   const second = await (await call('/api/outbox')).json();

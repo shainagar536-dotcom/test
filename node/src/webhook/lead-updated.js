@@ -1,3 +1,5 @@
+import { enrichEvent, refreshSourceCatalog } from '../events/enrich.js';
+
 /**
  * Turning a Surense webhook delivery into a recorded change.
  *
@@ -6,9 +8,9 @@
  * The event states what moved.
  *
  * What the event does not carry is the referring source, which is what decides
- * who gets told. That comes from the lead row the polling sync maintains, so
- * the two paths are complementary rather than redundant: polling keeps the
- * lead data complete, the webhook makes status changes immediate.
+ * who gets told. That is read back from the CRM once per event — the lead for
+ * its `sourceId`, then the cached catalog for the name — so no copy of the
+ * lead table has to be kept just to answer it.
  */
 
 /**
@@ -158,51 +160,90 @@ export function interpretDelivery(payload) {
 }
 
 /**
- * Records what a delivery means, against the stored lead.
+ * Records what a delivery means.
  *
- * Returns what happened rather than throwing on the ordinary cases: a delivery
- * that changes nothing notifiable, or names a lead not yet synced, is a normal
- * outcome and the endpoint should still answer 200 so Surense does not retry
- * something that will never succeed.
+ * The event is written first and looked up afterwards. That order is the
+ * whole design: resolving the referring source needs the CRM, and a CRM that
+ * is slow, rate-limited or down must cost us an enrichment we can retry —
+ * never the event itself, which arrives once and is not replayed on demand.
+ *
+ * Returns what happened rather than throwing on the ordinary cases: a
+ * delivery that changes no status is a normal outcome, and the endpoint still
+ * answers 200 so Surense does not retry something that will never succeed.
  *
  * @param {object} input
  * @param {import('../db/index.js').Database} input.db
  * @param {object} input.payload
- * @param {object} input.columns   config.messaging.columns
- * @param {string} input.timeZone
- * @returns {Promise<{recorded: boolean, reason: ?string, changeIds: Array<number>}>}
+ * @param {object} [input.client]  A SurenseClient; when absent the event is
+ *                                 recorded and left for the enrichment pass.
+ * @param {object} input.config
+ * @returns {Promise<{recorded: boolean, reason: ?string, eventId: ?number,
+ *                    duplicate: boolean, enriched: ?object}>}
  */
-export async function recordDelivery({ db, payload, columns, timeZone }) {
+export async function recordDelivery({ db, payload, client, config }) {
   const event = interpretDelivery(payload);
 
-  if (!event.isLeadUpdate) {
-    return { recorded: false, reason: event.reason, changeIds: [] };
-  }
+  const nothing = (reason) =>
+    ({ recorded: false, reason, eventId: null, duplicate: false, enriched: null });
 
-  if (event.statusAfter === null) {
-    return { recorded: false, reason: event.reason, changeIds: [] };
-  }
+  if (!event.isLeadUpdate) return nothing(event.reason);
+  if (event.statusAfter === null) return nothing(event.reason);
 
-  const lead = await db.getLead(event.leadId);
+  // Written before any lookup. Everything below this line is recoverable;
+  // losing the event is not.
+  const { id, created } = await db.recordStatusEvent({
+    leadId: event.leadId,
+    leadNumber: event.leadNumber ?? '',
+    customerName: event.clientName ?? '',
+    statusBefore: event.statusBefore ?? '',
+    statusAfter: event.statusAfter,
+    occurredAt: event.occurredAt
+  });
 
-  // A lead the sync has not seen yet. The next POST /api/sync will pick it up,
-  // and its status will be recorded then — so this is a wait, not a failure.
-  if (!lead) {
+  if (!created) {
     return {
       recorded: false,
-      reason: `lead ${event.leadId} is not in the database yet; run a sync`,
-      changeIds: []
+      reason: 'this status change was already recorded',
+      eventId: id,
+      duplicate: true,
+      enriched: null
     };
   }
 
-  const changeIds = await db.recordWebhookChange({
-    leadId: event.leadId,
-    statusColumn: columns.status,
-    before: event.statusBefore ?? '',
-    after: event.statusAfter,
-    occurredAt: event.occurredAt,
-    timeZone
-  });
+  // Enrichment is best-effort and inline only as an optimisation: doing it
+  // now means the row is complete by the time anyone looks. If it fails the
+  // row stays 'pending' and the enrichment pass picks it up.
+  let enriched = null;
 
-  return { recorded: true, reason: null, changeIds, event };
+  if (client) {
+    try {
+      const sourceNames = await db.sourceNameMap();
+
+      const patch = await enrichEvent({
+        event: { lead_id: event.leadId },
+        client,
+        sourceNames,
+        columns: config.messaging.columns,
+        onUnknownSource: async () => {
+          await refreshSourceCatalog({ db, client, path: config.sourceCatalogPath });
+          return db.sourceNameMap();
+        }
+      });
+
+      await db.enrichStatusEvent(id, patch);
+      enriched = patch;
+    } catch (error) {
+      // Recorded but not enriched is a valid state, and the retry pass exists
+      // precisely for it. Failing the request here would make Surense retry a
+      // delivery we have already stored.
+      await db.enrichStatusEvent(id, {
+        sourceState: 'failed',
+        sourceError: error.message
+      });
+
+      enriched = { sourceState: 'failed', sourceError: error.message };
+    }
+  }
+
+  return { recorded: true, reason: null, eventId: id, duplicate: false, enriched, event };
 }

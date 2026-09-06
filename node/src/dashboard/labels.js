@@ -241,6 +241,7 @@ export const DELIVERY_LABELS = {
   'lead-has-no-source': 'לליד אין מקור מפנה',
   'source-id-not-mapped': 'מזהה המקור לא ממופה לשם',
   'source-not-in-recipients': 'המקור לא נמצא בטבלת הנמענים',
+  'source-not-looked-up-yet': 'המקור עוד לא נבדק מול ה-CRM',
   'recipient-inactive': 'הנמען מושבת',
   'recipient-has-no-address': 'לנמען אין כתובת'
 };
@@ -248,4 +249,88 @@ export const DELIVERY_LABELS = {
 /** @param {string} reason */
 export function deliveryLabel(reason) {
   return DELIVERY_LABELS[reason] ?? reason;
+}
+
+
+/**
+ * Column headings for the status-change log.
+ *
+ * The log holds only what a notification needs, so this list is short by
+ * design — that is the point of the table, not a gap in it.
+ */
+export const EVENT_LABELS = {
+  occurred_at: 'מתי',
+  customer_name: 'שם הלקוח',
+  lead_number: 'מספר ליד',
+  status_before: 'מסטטוס',
+  status_after: 'לסטטוס',
+  assignee_name: 'מטפל',
+  source_name: 'מקור מפנה',
+  handled: 'טופל'
+};
+
+/** How a source lookup ended up, in Hebrew. */
+export const SOURCE_STATE_LABELS = {
+  pending: 'בבדיקה',
+  resolved: 'נמצא',
+  absent: 'אין מקור לליד',
+  failed: 'החיפוש נכשל'
+};
+
+/**
+ * Renders one event row for the screen.
+ *
+ * The delivery verdict is passed in rather than worked out here: it comes
+ * from the same buildEventOutbox the sender runs, so the badge on the row and
+ * what actually goes out cannot drift apart.
+ *
+ * @param {object} event
+ * @param {Set<number>} sendable
+ * @param {Map<number, string>} reasons
+ * @returns {object}
+ */
+export function describeEvent(event, sendable, reasons) {
+  const id = Number(event.id);
+
+  const handled = event.notified_at
+    ? {
+      state: 'sent',
+      label: DELIVERY_LABELS.sent,
+      reason: null,
+      at: formatDate(event.notified_at),
+      via: event.notified_via || null,
+      to: event.notified_to || null
+    }
+    : sendable.has(id)
+      ? { state: 'pending', label: DELIVERY_LABELS.pending, reason: null, at: null, via: null }
+      : {
+        state: reasons.get(id) === 'source-not-looked-up-yet' ? 'waiting' : 'blocked',
+        label: reasons.get(id) === 'source-not-looked-up-yet'
+          ? 'ממתין לזיהוי המקור'
+          : DELIVERY_LABELS.blocked,
+        reason: deliveryLabel(reasons.get(id) ?? ''),
+        at: null,
+        via: null
+      };
+
+  return {
+    id,
+    leadId: event.lead_id,
+    display: {
+      occurred_at: formatDate(event.occurred_at),
+      customer_name: event.customer_name || '',
+      lead_number: event.lead_number || '',
+      status_before: event.status_before || '',
+      status_after: event.status_after || '',
+      assignee_name: event.assignee_name || '',
+      source_name: event.source_name ||
+        SOURCE_STATE_LABELS[event.source_state] || ''
+    },
+    sourceState: event.source_state,
+    sourceStateLabel: SOURCE_STATE_LABELS[event.source_state] ?? event.source_state,
+    sourceId: event.source_id || '',
+    sourceError: event.source_error || '',
+    recordedAt: formatDate(event.recorded_at),
+    handled
+  };
 }

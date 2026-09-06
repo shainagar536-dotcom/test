@@ -24,7 +24,7 @@ const config = {
   database: { url: DATABASE_URL, ssl: false, maxConnections: 4 },
   api: { port: 0, token: 't', webhookSecret: 'h', svixSecret: '' },
   sync: { timeZone: 'Asia/Jerusalem', idKey: 'id', activeDays: [0], activeHours: [8],
-    shrinkGuard: 0.5 },
+    shrinkGuard: 0.5, mirrorLeads: true },
   messaging: { columns: { status: 'סטטוס', source: 'מקור', clientName: 'שם',
     leadNumber: 'מספר' }, subject: 's', body: 'b', signature: '',
     maxPerRun: 25, redirectAllTo: '' }

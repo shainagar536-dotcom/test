@@ -7,6 +7,7 @@
 import { SurenseClient, toLabelledFields } from '../surense.js';
 import { planSync, readExisting, deriveColumns, headerFor } from '../mirror.js';
 import { optionsFromSchema } from '../sources.js';
+import { refreshSourceCatalog } from '../events/enrich.js';
 
 /** Runs are serialised in-process; a second caller is told to wait. */
 let inFlight = null;
@@ -59,6 +60,36 @@ async function execute({ db, config, trigger, fetchImpl }) {
       await db.upsertSources(sourceOptions, 'crm').catch(error => {
         console.warn(`Could not store the source catalog: ${error.message}`);
       });
+    }
+
+    // Keeping a copy of every lead is optional, and off by default. What the
+    // service needs is the status changes and the source behind them, both of
+    // which now arrive by webhook and are read back per event — so a full
+    // read of the CRM every hour bought nothing but a stale copy.
+    if (!config.sync.mirrorLeads) {
+      // With the mirror off there is still one thing worth doing on a
+      // schedule: reloading the source catalog, so a source added in the CRM
+      // has a name before the first lead referred through it changes status.
+      const catalog = await refreshSourceCatalog({
+        db, client, path: config.sourceCatalogPath
+      }).catch(error => ({ loaded: 0, written: 0, error: error.message }));
+
+      const summary = {
+        ok: !catalog.error,
+        trigger,
+        leadsInCrm: 0,
+        stats: {},
+        outcome: catalog.error
+          ? `mirror off; the source catalog could not be read: ${catalog.error}`
+          : `mirror off; refreshed ${catalog.loaded} sources`,
+        sourcesLoaded: catalog.loaded,
+        sourcesWritten: catalog.written,
+        error: catalog.error ?? null
+      };
+
+      await db.finishRun(runId, summary);
+
+      return summary;
     }
 
     const { leads, complete } = await client.fetchAllLeads();

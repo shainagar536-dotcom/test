@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>מראה הלידים</title>
+<title>יומן שינויי סטטוס</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>%F0%9F%93%8B</text></svg>">
 <style>
   :root {
@@ -130,6 +130,7 @@
   .b-pending { color: var(--open);    background: var(--open-bg); }
   .b-blocked { color: var(--blocked); background: var(--blocked-bg); }
   .b-none    { color: var(--none);    background: var(--none-bg); }
+  .b-waiting { color: var(--none);    background: var(--none-bg); }
 
   .why { color: var(--muted); font-size: 11.5px; margin-top: 2px; white-space: normal; }
 
@@ -200,7 +201,7 @@
 
 <div id="gate" hidden>
   <div class="box">
-    <h2>מראה הלידים</h2>
+    <h2>יומן שינויי סטטוס</h2>
     <p>הדף לא מחזיק נתונים בעצמו. הדבק את ה-API_TOKEN כדי לקרוא מהשרת. הוא נשמר לשונית הזו בלבד ולא נשלח לשום מקום אחר.</p>
     <input id="tokenInput" type="password" placeholder="API_TOKEN" autocomplete="off" spellcheck="false">
     <div id="gateError" class="error" hidden></div>
@@ -209,10 +210,9 @@
 </div>
 
 <header>
-  <h1>מראה הלידים</h1>
+  <h1>יומן שינויי סטטוס</h1>
   <span id="stamp" class="card-sub" style="color:var(--muted);font-size:12px"></span>
   <span class="spacer"></span>
-  <button id="colsBtn">עמודות</button>
   <button id="refresh">רענון</button>
   <button id="logout">ניתוק</button>
 </header>
@@ -223,12 +223,11 @@
   <div class="cards" id="cards"></div>
 
   <div class="filters">
-    <input type="search" id="q" placeholder="שם, מספר ליד, טלפון או ת.ז">
+    <input type="search" id="q" placeholder="שם לקוח, מספר ליד, מקור או מטפל">
     <select id="delivery">
       <option value="all">הכול</option>
       <option value="open">לא טופל</option>
       <option value="sent">נשלח</option>
-      <option value="none">אין שינוי סטטוס</option>
     </select>
     <select id="status"><option value="">כל הסטטוסים</option></select>
     <select id="assignee"><option value="">כל המטפלים</option></select>
@@ -264,16 +263,21 @@
   <div class="body" id="dBody"></div>
 </div>
 
-<div id="colsPanel" class="cols" hidden></div>
 
 <script>
 const KEY_TOKEN = 'surense.token';
-const KEY_COLS  = 'surense.columns';
+
+// The log's columns are fixed and few on purpose: this table holds only what
+// a notification needs, so there is nothing to choose between.
+const COLUMNS = [
+  'occurred_at', 'customer_name', 'lead_number',
+  'status_before', 'status_after', 'assignee_name', 'source_name'
+];
 
 const state = {
   token: '', offset: 0, limit: 50,
   q: '', delivery: 'all', status: '', assignee: '',
-  columns: [], allColumns: [], total: 0, leads: []
+  total: 0, events: []
 };
 
 const $ = id => document.getElementById(id);
@@ -353,49 +357,48 @@ $('logout').onclick = () => {
 // --------------------------------------------------------------- rendering
 
 function badge(handled) {
-  const cls = { sent:'b-sent', pending:'b-pending', blocked:'b-blocked', none:'b-none' }[handled.state];
+  const cls = { sent:'b-sent', pending:'b-pending', blocked:'b-blocked',
+                waiting:'b-waiting', none:'b-none' }[handled.state];
   let html = '<span class="badge ' + cls + '">' + esc(handled.label) + '</span>';
 
   if (handled.reason) html += '<div class="why">' + esc(handled.reason) + '</div>';
   else if (handled.state === 'sent' && handled.at)
-    html += '<div class="why">' + esc(handled.at) + (handled.via ? ' · ' + esc(handled.via) : '') + '</div>';
+    html += '<div class="why">' + esc(handled.at) +
+      (handled.to ? ' · ' + esc(handled.to) : handled.via ? ' · ' + esc(handled.via) : '') + '</div>';
 
   return html;
 }
 
-function renderCards(summary) {
-  const card = (n, t, sub) =>
-    '<div class="card"><div class="n">' + n + '</div><div class="t">' + t + '</div>' +
+function renderCards(data) {
+  const n = v => Number(v ?? 0).toLocaleString('he-IL');
+
+  const card = (value, title, sub) =>
+    '<div class="card"><div class="n">' + value + '</div><div class="t">' + title + '</div>' +
     (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
 
+  const c = data.counts;
+
   $('cards').innerHTML =
-    card(summary.leads.toLocaleString('he-IL'), 'לידים במסד') +
-    card(summary.openLeads.toLocaleString('he-IL'), 'לידים שלא טופלו',
-         summary.openChanges.toLocaleString('he-IL') + ' שינויי סטטוס ממתינים') +
-    card(summary.sentLeads.toLocaleString('he-IL'), 'לידים שנשלחו',
-         summary.sentChanges.toLocaleString('he-IL') + ' הודעות שיצאו') +
-    card(summary.unresolvedSources.toLocaleString('he-IL'), 'מקורות בלי שם',
-         summary.unresolvedLeads.toLocaleString('he-IL') + ' לידים חסומים בגללם') +
-    card(summary.recipients.toLocaleString('he-IL'), 'נמענים מוגדרים',
-         summary.redirectAllTo ? 'פיילוט: הכול ל־' + esc(summary.redirectAllTo) : 'שליחה חיה');
+    card(n(c.total), 'שינויי סטטוס', n(c.leads) + ' לידים') +
+    card(n(c.open), 'לא טופלו', 'ממתינים לשליחה') +
+    card(n(c.sent), 'נשלחו', 'הודעות שיצאו') +
+    card(n(c.unresolved), 'מקור עוד לא זוהה', n(c.resolved) + ' זוהו') +
+    card(n(data.recipients), 'נמענים מוגדרים',
+         data.redirectAllTo ? 'פיילוט: הכול ל־' + esc(data.redirectAllTo) : 'שליחה חיה');
 }
 
 function renderTable() {
-  const cols = state.columns;
-
   $('head').innerHTML =
-    cols.map(c => '<th>' + esc(labelOf(c)) + '</th>').join('') +
-    '<th>מקור מפנה</th><th>טופל</th>';
+    COLUMNS.map(c => '<th>' + esc(labelOf(c)) + '</th>').join('') + '<th>טופל</th>';
 
-  $('rows').innerHTML = state.leads.map((lead, i) =>
+  $('rows').innerHTML = state.events.map((event, i) =>
     '<tr data-i="' + i + '">' +
-    cols.map(c => '<td>' + val(lead.display[c]) + '</td>').join('') +
-    '<td>' + esc(lead.sourceName || '—') + '</td>' +
-    '<td>' + badge(lead.handled) + '</td>' +
+    COLUMNS.map(c => '<td>' + val(event.display[c]) + '</td>').join('') +
+    '<td>' + badge(event.handled) + '</td>' +
     '</tr>').join('');
 
   for (const tr of $('rows').querySelectorAll('tr')) {
-    tr.onclick = () => openDrawer(state.leads[Number(tr.dataset.i)]);
+    tr.onclick = () => openDrawer(state.events[Number(tr.dataset.i)]);
   }
 
   const from = state.total ? state.offset + 1 : 0;
@@ -405,67 +408,44 @@ function renderTable() {
   $('prev').disabled = state.offset === 0;
   $('next').disabled = to >= state.total;
 
-  $('state').hidden = state.leads.length > 0;
-  if (!state.leads.length) {
+  $('state').hidden = state.events.length > 0;
+  if (!state.events.length) {
     $('state').className = 'empty';
-    $('state').textContent = 'אין לידים שמתאימים לסינון.';
+    $('state').textContent = state.total === 0 && !state.q
+      ? 'עוד לא נרשם אף שינוי סטטוס. הרשומה הראשונה תופיע כאן ברגע שסטטוס ישתנה ב-CRM.'
+      : 'אין רשומות שמתאימות לסינון.';
   }
 }
 
 let LABELS = {};
 const labelOf = key => LABELS[key] ?? key;
 
-function openDrawer(lead) {
-  $('dTitle').textContent = lead.display.fullName || lead.id;
+function openDrawer(event) {
+  $('dTitle').textContent = event.display.customer_name || event.leadId;
 
-  const rows = state.allColumns
-    .filter(c => (lead.display[c] ?? '') !== '')
-    .map(c => '<tr><td>' + esc(labelOf(c)) + '</td><td>' + val(lead.display[c]) + '</td></tr>')
+  const rows = COLUMNS
+    .filter(c => (event.display[c] ?? '') !== '')
+    .map(c => '<tr><td>' + esc(labelOf(c)) + '</td><td>' + val(event.display[c]) + '</td></tr>')
     .join('');
 
+  const lookup =
+    '<tr><td>מצב זיהוי המקור</td><td>' + esc(event.sourceStateLabel) + '</td></tr>' +
+    (event.sourceId
+      ? '<tr><td>מזהה המקור</td><td>' + val(event.sourceId) + '</td></tr>' : '') +
+    (event.sourceError
+      ? '<tr><td>שגיאת זיהוי</td><td>' + esc(event.sourceError) + '</td></tr>' : '');
+
   $('dBody').innerHTML =
-    '<h3>מצב שליחה</h3><table><tr><td>טופל</td><td>' + badge(lead.handled) + '</td></tr>' +
-    '<tr><td>מקור מפנה</td><td>' + esc(lead.sourceName || '—') + '</td></tr></table>' +
-    '<h3>שדות הליד</h3><table>' + rows + '</table>';
+    '<h3>מצב שליחה</h3><table><tr><td>טופל</td><td>' + badge(event.handled) + '</td></tr>' +
+    lookup + '</table>' +
+    '<h3>השינוי</h3><table>' + rows +
+    '<tr><td>מזהה ליד</td><td>' + val(event.leadId) + '</td></tr>' +
+    '<tr><td>נרשם אצלנו</td><td>' + val(event.recordedAt) + '</td></tr></table>';
 
   $('drawer').hidden = false;
 }
 
 $('dClose').onclick = () => { $('drawer').hidden = true; };
-
-// ----------------------------------------------------------- column picker
-
-function renderColumnPicker() {
-  $('colsPanel').innerHTML = state.allColumns.map(c =>
-    '<label><input type="checkbox" value="' + esc(c) + '"' +
-    (state.columns.includes(c) ? ' checked' : '') + '> ' + esc(labelOf(c)) + '</label>').join('');
-
-  for (const box of $('colsPanel').querySelectorAll('input')) {
-    box.onchange = () => {
-      state.columns = state.allColumns.filter(c =>
-        $('colsPanel').querySelector('input[value="' + CSS.escape(c) + '"]').checked);
-
-      store(KEY_COLS, JSON.stringify(state.columns), false);
-      renderTable();
-    };
-  }
-}
-
-$('colsBtn').onclick = e => {
-  const panel = $('colsPanel');
-  panel.hidden = !panel.hidden;
-
-  if (!panel.hidden) {
-    const box = e.target.getBoundingClientRect();
-    panel.style.top = (box.bottom + 6) + 'px';
-    panel.style.insetInlineStart = Math.max(10, box.left) + 'px';
-    renderColumnPicker();
-  }
-};
-
-document.addEventListener('click', e => {
-  if (!$('colsPanel').contains(e.target) && e.target !== $('colsBtn')) $('colsPanel').hidden = true;
-});
 
 // ------------------------------------------------------------------ loading
 
@@ -484,12 +464,12 @@ async function load() {
   });
 
   try {
-    const data = await api('/api/dashboard/leads?' + query);
+    const data = await api('/api/dashboard/events?' + query);
 
-    state.leads = data.leads;
+    state.events = data.events;
     state.total = data.total;
 
-    renderCards(data.summary);
+    renderCards(data);
     renderTable();
 
     $('stamp').textContent = 'עודכן ' + new Date().toLocaleTimeString('he-IL');
@@ -521,14 +501,6 @@ async function boot() {
   const meta = await api('/api/dashboard/filters');
 
   LABELS = meta.labels;
-  state.allColumns = meta.columns;
-
-  let saved = null;
-  try { saved = JSON.parse(readStored(KEY_COLS) || 'null'); } catch {}
-
-  state.columns = Array.isArray(saved) && saved.length
-    ? saved.filter(c => meta.columns.includes(c))
-    : meta.defaultColumns;
 
   const fill = (id, values, label) => {
     $(id).innerHTML = '<option value="">' + label + '</option>' +

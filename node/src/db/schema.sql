@@ -177,3 +177,113 @@ CREATE TABLE IF NOT EXISTS source_names (
 INSERT INTO sources (source_id, name, origin)
 SELECT source_id, source_name, 'crm' FROM source_names
     ON CONFLICT (source_id) DO NOTHING;
+
+-- ===========================================================================
+-- The status-change log: the record this service exists to keep.
+--
+-- One row per status change, carrying only what a notification needs — who
+-- the lead is, what the status moved from and to, who handles it, and which
+-- referring source to tell. Nothing else about the lead is stored: the CRM is
+-- the system of record for lead data, and mirroring three thousand rows to
+-- answer a question about the dozen that moved was work nobody needed.
+--
+-- The row is written the moment the event arrives and enriched afterwards.
+-- That order is deliberate: resolving the source needs the CRM, and a CRM
+-- that is slow or down must never cost us the event itself.
+CREATE TABLE IF NOT EXISTS status_events (
+    id             BIGSERIAL PRIMARY KEY,
+
+    -- Denormalized on purpose. This row has to stay readable years from now
+    -- with no lead table to join against.
+    lead_id        TEXT        NOT NULL,
+    lead_number    TEXT        NOT NULL DEFAULT '',
+    customer_name  TEXT        NOT NULL DEFAULT '',
+
+    status_before  TEXT        NOT NULL DEFAULT '',
+    status_after   TEXT        NOT NULL DEFAULT '',
+
+    -- The CRM user handling the lead. Arrives with the lead, needs no lookup.
+    assignee_name  TEXT        NOT NULL DEFAULT '',
+
+    -- The referring source: the id the lead carries, and the name resolved
+    -- for it. `source_state` says which of those is true yet.
+    source_id      TEXT        NOT NULL DEFAULT '',
+    source_name    TEXT        NOT NULL DEFAULT '',
+
+    -- pending  — recorded, not yet enriched
+    -- resolved — the source name is known
+    -- absent   — the CRM says this lead has no referring source
+    -- failed   — the lookup was tried and did not succeed; see source_error
+    source_state   TEXT        NOT NULL DEFAULT 'pending',
+    source_error   TEXT        NOT NULL DEFAULT '',
+    enrich_attempts INTEGER    NOT NULL DEFAULT 0,
+
+    -- When the change happened, per the event — not when we heard about it.
+    occurred_at    TIMESTAMPTZ NOT NULL,
+    recorded_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- Set once a message has gone out for this change.
+    notified_at    TIMESTAMPTZ,
+    notified_via   TEXT        NOT NULL DEFAULT '',
+    notified_to    TEXT        NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS status_events_occurred_idx
+    ON status_events (occurred_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS status_events_lead_idx ON status_events (lead_id);
+
+CREATE INDEX IF NOT EXISTS status_events_pending_idx
+    ON status_events (occurred_at) WHERE notified_at IS NULL;
+
+-- Events still waiting for their source to be looked up.
+CREATE INDEX IF NOT EXISTS status_events_enrich_idx
+    ON status_events (id) WHERE source_state IN ('pending', 'failed');
+
+-- The same status change delivered twice must not become two rows. Svix
+-- retries with the same message id, but a replay from a different path would
+-- not carry one, so identity is the change itself: this lead, this move, at
+-- this moment.
+CREATE UNIQUE INDEX IF NOT EXISTS status_events_identity_idx
+    ON status_events (lead_id, status_before, status_after, occurred_at);
+
+-- ---------------------------------------------------------------------------
+-- History is append-only, enforced by the database rather than by convention.
+--
+-- The point is that a future change to this code CANNOT quietly destroy the
+-- record: a DELETE or a TRUNCATE against this table raises instead. Updates
+-- are still allowed, because enrichment and "notified" both write to a row
+-- after it lands.
+--
+-- The escape hatch is deliberate and loud — a caller must say, in its own
+-- transaction, that it means it:
+--     BEGIN; SET LOCAL app.allow_history_delete = 'on'; DELETE ...; COMMIT;
+CREATE OR REPLACE FUNCTION status_events_no_delete() RETURNS trigger AS $$
+BEGIN
+    IF coalesce(current_setting('app.allow_history_delete', true), 'off') <> 'on' THEN
+        RAISE EXCEPTION
+            'status_events is append-only: % is refused', TG_OP
+            USING HINT = 'Set app.allow_history_delete to on in this '
+                         'transaction if you really mean to.';
+    END IF;
+
+    -- A BEFORE DELETE trigger that returns NULL cancels the row silently, so
+    -- the permitted path has to hand the row back. TRUNCATE is a statement
+    -- trigger and ignores the return value.
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS status_events_no_delete_row ON status_events;
+CREATE TRIGGER status_events_no_delete_row
+    BEFORE DELETE ON status_events
+    FOR EACH ROW EXECUTE FUNCTION status_events_no_delete();
+
+DROP TRIGGER IF EXISTS status_events_no_truncate ON status_events;
+CREATE TRIGGER status_events_no_truncate
+    BEFORE TRUNCATE ON status_events
+    FOR EACH STATEMENT EXECUTE FUNCTION status_events_no_delete();

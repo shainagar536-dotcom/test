@@ -34,7 +34,7 @@ const config = {
     intervalMinutes: 60,
     activeDays: [0, 1, 2, 3, 4, 5],
     activeHours: [8, 20],
-    shrinkGuard: 0.5
+    shrinkGuard: 0.5, mirrorLeads: true
   }
 };
 
@@ -104,6 +104,10 @@ after(async () => {
 
 beforeEach(async () => {
   await db.pool.query('TRUNCATE leads, changes, sync_runs, webhook_events, source_names, sources, cursors');
+
+  // History is append-only; clearing it in a test has to say so.
+  await db.pool.query("BEGIN; SET LOCAL app.allow_history_delete = 'on'; " +
+    'DELETE FROM status_events; COMMIT;');
   crmLeads = [lead(1), lead(2), lead(3)];
 });
 
