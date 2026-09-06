@@ -415,8 +415,9 @@ export class Database {
   /** @returns {Promise<Array<object>>} */
   async listRecipients() {
     const { rows } = await this.pool.query(
-      `SELECT source_key, source_name, email, whatsapp, active, updated_at
-         FROM recipients ORDER BY source_name`);
+      `SELECT source_key, source_name, email, whatsapp, channel, leads,
+              active, updated_at
+         FROM recipients ORDER BY leads DESC, source_name`);
 
     return rows;
   }
@@ -425,18 +426,62 @@ export class Database {
    * @param {{sourceKey: string, sourceName: string, email?: string,
    *          whatsapp?: string, active?: boolean}} recipient
    */
-  async saveRecipient({ sourceKey, sourceName, email = '', whatsapp = '', active = true }) {
+  async saveRecipient({
+    sourceKey, sourceName, email = '', whatsapp = '', active = true,
+    channel = '', leads = 0
+  }) {
+    // The channel follows the address when it is not given, so a row edited
+    // in the dashboard with only an email does not have to say twice that it
+    // is an email row.
+    const resolved = channel || (email ? 'email' : whatsapp ? 'whatsapp' : '');
+
     const { rows } = await this.pool.query(
-      `INSERT INTO recipients (source_key, source_name, email, whatsapp, active)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO recipients
+              (source_key, source_name, email, whatsapp, channel, leads, active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (source_key) DO UPDATE
          SET source_name = EXCLUDED.source_name, email = EXCLUDED.email,
-             whatsapp = EXCLUDED.whatsapp, active = EXCLUDED.active,
+             whatsapp = EXCLUDED.whatsapp, channel = EXCLUDED.channel,
+             leads = EXCLUDED.leads, active = EXCLUDED.active,
              updated_at = now()
-       RETURNING source_key, source_name, email, whatsapp, active`,
-      [sourceKey, sourceName, email, whatsapp, active]);
+       RETURNING source_key, source_name, email, whatsapp, channel, leads, active`,
+      [sourceKey, sourceName, email, whatsapp, resolved, leads, active]);
 
     return rows[0];
+  }
+
+  /**
+   * Writes the shipped recipient list into an empty table.
+   *
+   * Only into an empty one: after the first boot the dashboard owns this, and
+   * a deploy must not undo an address somebody corrected.
+   *
+   * @param {Array<object>} rows
+   * @returns {Promise<number>} how many were written
+   */
+  async seedRecipients(rows) {
+    const { rows: [{ count }] } =
+      await this.pool.query('SELECT count(*)::int AS count FROM recipients');
+
+    if (count > 0) return 0;
+
+    let written = 0;
+
+    for (const row of rows) {
+      await this.saveRecipient({
+        sourceKey: normalizeText(row.sourceName),
+        sourceName: row.sourceName,
+        email: row.email ?? '',
+        whatsapp: row.whatsapp ?? '',
+        channel: row.channel ?? '',
+        leads: row.leads ?? 0,
+        active: true
+      });
+
+      written++;
+    }
+
+    return written;
   }
 
   /** @param {string} sourceKey */
@@ -1018,13 +1063,34 @@ export class Database {
       `UPDATE status_events
           SET notified_at = now(), notified_via = $2, notified_to = $3
         WHERE id = ANY($1) AND notified_at IS NULL
-        RETURNING id`,
+        RETURNING id, lead_id, occurred_at`,
       [ids, via, to]);
 
     const claimed = rows.map(row => Number(row.id));
 
+    // A lead that moved twice before anything went out has older unsent
+    // events that are now history, not a queue. Closing them against the one
+    // that was sent keeps every move in the record and says which was
+    // reported — rather than leaving them to be sent later, out of date.
+    let superseded = 0;
+
+    for (const row of rows) {
+      const { rowCount } = await this.pool.query(
+        `UPDATE status_events
+            SET notified_at = now(),
+                notified_via = 'superseded',
+                superseded_by = $1
+          WHERE lead_id = $2
+            AND notified_at IS NULL
+            AND (occurred_at, id) < ($3, $1)`,
+        [Number(row.id), row.lead_id, row.occurred_at]);
+
+      superseded += rowCount;
+    }
+
     return {
       claimed,
+      superseded,
       alreadyClaimed: ids.filter(id => !claimed.includes(Number(id)))
     };
   }

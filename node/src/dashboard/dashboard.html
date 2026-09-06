@@ -183,6 +183,38 @@
 
   [hidden] { display: none !important; }
 
+  .tabs { display: flex; gap: 4px; }
+  .tab {
+    border: none; background: transparent; color: var(--muted);
+    padding: 6px 13px; border-radius: 8px; font-weight: 600;
+  }
+  .tab:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .tab.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+
+  .editrow input, .editrow select, .editrow textarea {
+    width: 100%; font: inherit; padding: 5px 8px;
+  }
+  .editrow textarea { min-height: 46px; resize: vertical; line-height: 1.45; }
+  .editrow td { vertical-align: top; }
+
+  .dirty { outline: 2px solid var(--open); outline-offset: -2px; }
+
+  .bar {
+    display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 13px;
+  }
+
+  .muted-list {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 11px;
+    padding: 14px 17px; margin-top: 18px; color: var(--muted); font-size: 13px;
+  }
+  .muted-list b { color: var(--ink); }
+  .chip {
+    display: inline-block; background: var(--none-bg); color: var(--none);
+    border-radius: 6px; padding: 2px 8px; margin: 3px 3px 0 0; font-size: 12.5px;
+  }
+  .pill { font-size: 11.5px; color: var(--muted); }
+
   /* A phone number or a UUID is left-to-right text sitting in a right-to-left
      page. Without this the browser moves the leading + to the end, so
      +972545541400 is shown — and read out to a customer — as 972545541400+. */
@@ -214,6 +246,11 @@
 
 <header>
   <h1>יומן שינויי סטטוס</h1>
+  <nav class="tabs">
+    <button class="tab on" data-tab="log">יומן</button>
+    <button class="tab" data-tab="policy">נוסחי הודעות</button>
+    <button class="tab" data-tab="recipients">מקורות ונמענים</button>
+  </nav>
   <span id="stamp" class="card-sub" style="color:var(--muted);font-size:12px"></span>
   <span class="spacer"></span>
   <button id="refresh">רענון</button>
@@ -223,6 +260,7 @@
 <main>
   <div id="err" class="error" hidden></div>
 
+<section id="pane-log">
   <div class="cards" id="cards"></div>
 
   <div class="filters">
@@ -260,6 +298,63 @@
     <span id="range"></span>
     <button id="next">הבא</button>
   </div>
+</section>
+
+<section id="pane-policy" hidden>
+  <div class="bar">
+    <strong>נוסחי ההודעות</strong>
+    <span class="pill" id="policyCount"></span>
+    <span class="spacer" style="flex:1"></span>
+    <button class="primary" id="savePolicy" disabled>שמירת שינויים</button>
+  </div>
+
+  <div id="policyConflict" class="error" hidden></div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th style="width:22%">סטטוס</th>
+        <th>נוסח ההודעה</th>
+        <th style="width:11%">ערוץ ברירת מחדל</th>
+        <th style="width:8%">פעיל</th>
+      </tr></thead>
+      <tbody id="policyRows"></tbody>
+    </table>
+  </div>
+
+  <div class="muted-list">
+    <b>סטטוסים שלא שולחים בהם כלום</b> — <span id="mutedCount"></span>.
+    השתקה היא ברירת המחדל בלי קשר: סטטוס בלי נוסח לא שולח כלום.
+    הרשימה קיימת כדי להבדיל בין "החלטנו לא לשלוח" לבין "עוד לא נכתב".
+    <div id="mutedChips" style="margin-top:8px"></div>
+  </div>
+</section>
+
+<section id="pane-recipients" hidden>
+  <div class="cards" id="recipCards"></div>
+
+  <div class="bar">
+    <input type="search" id="recipSearch" placeholder="חיפוש מקור, מייל או טלפון">
+    <span class="spacer" style="flex:1"></span>
+    <button id="addRecip">הוספת מקור</button>
+    <button class="primary" id="saveRecips" disabled>שמירת שינויים</button>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th style="width:26%">מקור</th>
+        <th style="width:24%">מייל</th>
+        <th style="width:17%">וואטסאפ</th>
+        <th style="width:11%">ערוץ</th>
+        <th style="width:8%">לידים</th>
+        <th style="width:7%">פעיל</th>
+        <th style="width:7%"></th>
+      </tr></thead>
+      <tbody id="recipRows"></tbody>
+    </table>
+  </div>
+</section>
 </main>
 
 <div id="drawer" hidden>
@@ -312,9 +407,14 @@ function store(key, value, session) {
   try { (session ? sessionStorage : localStorage).setItem(key, value); } catch {}
 }
 
-async function api(path) {
+async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: { Authorization: 'Bearer ' + state.token }
+    ...options,
+    headers: {
+      Authorization: 'Bearer ' + state.token,
+      'Content-Type': 'application/json',
+      ...(options.headers ?? {})
+    }
   });
 
   if (response.status === 401) {
@@ -521,6 +621,210 @@ $('limit').onchange = () => { state.limit = Number($('limit').value); reload(tru
 $('refresh').onclick = () => load();
 $('prev').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); load(); };
 $('next').onclick = () => { state.offset += state.limit; load(); };
+
+// ------------------------------------------------------------------- tabs
+
+const PANES = ['log', 'policy', 'recipients'];
+let policyLoaded = false;
+let recipsLoaded = false;
+
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.onclick = () => {
+    for (const other of document.querySelectorAll('.tab')) other.classList.remove('on');
+    tab.classList.add('on');
+
+    for (const name of PANES) $('pane-' + name).hidden = name !== tab.dataset.tab;
+
+    if (tab.dataset.tab === 'policy' && !policyLoaded) loadPolicy();
+    if (tab.dataset.tab === 'recipients' && !recipsLoaded) loadRecipients();
+  };
+}
+
+// ---------------------------------------------------------------- policy
+
+const policyEdits = new Map();
+
+async function loadPolicy() {
+  const data = await api('/api/dashboard/policy');
+  policyLoaded = true;
+  policyEdits.clear();
+  $('savePolicy').disabled = true;
+
+  $('policyCount').textContent =
+    data.templates.length + ' סטטוסים שולחים · ' + data.muted.length + ' מושתקים';
+
+  // Wording written for a status the policy mutes contradicts itself, and the
+  // wording wins at send time — so it is stated rather than left to be found.
+  $('policyConflict').hidden = !data.conflicts.length;
+  if (data.conflicts.length) {
+    $('policyConflict').textContent =
+      'לסטטוסים האלה יש נוסח למרות שהם ברשימת המושתקים, ולכן הם כן ישלחו: ' +
+      data.conflicts.join(', ');
+  }
+
+  $('policyRows').innerHTML = data.templates.map((t, i) =>
+    '<tr class="editrow" data-i="' + i + '">' +
+    '<td><b>' + esc(t.status) + '</b>' +
+      (t.edited ? '<div class="pill">שונה מהמקור</div>' : '') + '</td>' +
+    '<td><textarea data-field="message">' + esc(t.message) + '</textarea></td>' +
+    '<td><select data-field="channel">' +
+      '<option value="email"' + (t.channel === 'email' ? ' selected' : '') + '>מייל</option>' +
+      '<option value="whatsapp"' + (t.channel === 'whatsapp' ? ' selected' : '') + '>וואטסאפ</option>' +
+      '</select></td>' +
+    '<td><input type="checkbox" data-field="active"' + (t.active ? ' checked' : '') + '></td>' +
+    '</tr>').join('');
+
+  $('mutedCount').textContent = data.muted.length + ' סטטוסים';
+  $('mutedChips').innerHTML =
+    data.muted.map(m => '<span class="chip">' + esc(m) + '</span>').join('');
+
+  for (const tr of $('policyRows').querySelectorAll('tr')) {
+    const template = data.templates[Number(tr.dataset.i)];
+
+    for (const field of tr.querySelectorAll('[data-field]')) {
+      field.oninput = field.onchange = () => {
+        const row = {
+          status: template.status,
+          message: tr.querySelector('[data-field=message]').value,
+          channel: tr.querySelector('[data-field=channel]').value,
+          active: tr.querySelector('[data-field=active]').checked
+        };
+
+        policyEdits.set(template.status, row);
+        tr.classList.add('dirty');
+        $('savePolicy').disabled = false;
+      };
+    }
+  }
+}
+
+$('savePolicy').onclick = async () => {
+  $('savePolicy').disabled = true;
+
+  try {
+    await api('/api/templates', {
+      method: 'PUT', body: JSON.stringify([...policyEdits.values()])
+    });
+
+    policyLoaded = false;
+    await loadPolicy();
+  } catch (error) {
+    $('savePolicy').disabled = false;
+    $('err').hidden = false;
+    $('err').textContent = error.message;
+  }
+};
+
+// ------------------------------------------------------------ recipients
+
+const recipEdits = new Map();
+
+async function loadRecipients() {
+  const data = await api('/api/dashboard/recipients?search=' +
+    encodeURIComponent($('recipSearch').value.trim()));
+
+  recipsLoaded = true;
+  recipEdits.clear();
+  $('saveRecips').disabled = true;
+
+  const n = v => Number(v ?? 0).toLocaleString('he-IL');
+
+  $('recipCards').innerHTML =
+    '<div class="card"><div class="n">' + n(data.total) + '</div>' +
+      '<div class="t">מקורות ברשימה</div></div>' +
+    '<div class="card"><div class="n">' + n(data.email) + '</div>' +
+      '<div class="t">במייל</div></div>' +
+    '<div class="card"><div class="n">' + n(data.whatsapp) + '</div>' +
+      '<div class="t">בוואטסאפ</div></div>' +
+    '<div class="card"><div class="n">' + n(data.noAddress) + '</div>' +
+      '<div class="t">בלי כתובת</div>' +
+      '<div class="sub">אלה שקטים — לא בגלל החלטה</div></div>';
+
+  $('recipRows').innerHTML = data.recipients.map((r, i) => recipRow(r, i)).join('');
+  wireRecipRows(data.recipients);
+}
+
+function recipRow(r, i) {
+  return '<tr class="editrow" data-i="' + i + '">' +
+    '<td><input data-field="sourceName" value="' + esc(r.source_name) + '"></td>' +
+    '<td><input data-field="email" class="ltr" value="' + esc(r.email ?? '') + '"></td>' +
+    '<td><input data-field="whatsapp" class="ltr" value="' + esc(r.whatsapp ?? '') + '"></td>' +
+    '<td><select data-field="channel">' +
+      '<option value=""' + (!r.channel ? ' selected' : '') + '>—</option>' +
+      '<option value="email"' + (r.channel === 'email' ? ' selected' : '') + '>מייל</option>' +
+      '<option value="whatsapp"' + (r.channel === 'whatsapp' ? ' selected' : '') + '>וואטסאפ</option>' +
+      '</select></td>' +
+    '<td>' + (r.leads ?? 0) + '</td>' +
+    '<td><input type="checkbox" data-field="active"' + (r.active ? ' checked' : '') + '></td>' +
+    '<td><button data-del="' + esc(r.source_key ?? '') + '">מחיקה</button></td>' +
+    '</tr>';
+}
+
+function wireRecipRows(rows) {
+  for (const tr of $('recipRows').querySelectorAll('tr')) {
+    const original = rows[Number(tr.dataset.i)] ?? {};
+
+    for (const field of tr.querySelectorAll('[data-field]')) {
+      field.oninput = field.onchange = () => {
+        recipEdits.set(tr.dataset.i, {
+          sourceName: tr.querySelector('[data-field=sourceName]').value.trim(),
+          email: tr.querySelector('[data-field=email]').value.trim(),
+          whatsapp: tr.querySelector('[data-field=whatsapp]').value.trim(),
+          channel: tr.querySelector('[data-field=channel]').value,
+          leads: original.leads ?? 0,
+          active: tr.querySelector('[data-field=active]').checked
+        });
+
+        tr.classList.add('dirty');
+        $('saveRecips').disabled = false;
+      };
+    }
+
+    const remove = tr.querySelector('[data-del]');
+    if (remove) remove.onclick = async () => {
+      if (!remove.dataset.del) { tr.remove(); return; }
+      if (!confirm('למחוק את ' + original.source_name + ' מרשימת הנמענים?')) return;
+
+      await api('/api/recipients/' + encodeURIComponent(remove.dataset.del),
+        { method: 'DELETE' });
+
+      recipsLoaded = false;
+      loadRecipients();
+    };
+  }
+}
+
+$('addRecip').onclick = () => {
+  const index = 'new-' + Date.now();
+  const tr = document.createElement('tr');
+  tr.className = 'editrow dirty';
+  tr.dataset.i = index;
+  tr.innerHTML = recipRow({ source_name: '', email: '', whatsapp: '', channel: '',
+    leads: 0, active: true, source_key: '' }, index).replace(/^<tr[^>]*>|<\/tr>$/g, '');
+
+  $('recipRows').prepend(tr);
+  wireRecipRows({ [index]: {} });
+  tr.querySelector('input').focus();
+};
+
+$('recipSearch').oninput = () => { recipsLoaded = false; loadRecipients(); };
+
+$('saveRecips').onclick = async () => {
+  const rows = [...recipEdits.values()].filter(r => r.sourceName);
+  if (!rows.length) return;
+
+  $('saveRecips').disabled = true;
+
+  try {
+    await api('/api/recipients', { method: 'PUT', body: JSON.stringify(rows) });
+    recipsLoaded = false;
+    await loadRecipients();
+  } catch (error) {
+    $('saveRecips').disabled = false;
+    $('err').hidden = false;
+    $('err').textContent = error.message;
+  }
+};
 
 async function boot() {
   const meta = await api('/api/dashboard/filters');

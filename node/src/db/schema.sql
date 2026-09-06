@@ -136,9 +136,22 @@ CREATE TABLE IF NOT EXISTS recipients (
     source_name TEXT        NOT NULL,
     email       TEXT        NOT NULL DEFAULT '',
     whatsapp    TEXT        NOT NULL DEFAULT '',
+
+    -- How this source is reached: 'email', 'whatsapp', or empty when nobody
+    -- has an address for it. This decides how the message goes out, so the
+    -- sender never has to guess from which column happens to be filled.
+    channel     TEXT        NOT NULL DEFAULT '',
+
+    -- How many leads this source carried when the list was written. A hint
+    -- for ordering the work, not something the sender reads.
+    leads       INTEGER     NOT NULL DEFAULT 0,
+
     active      BOOLEAN     NOT NULL DEFAULT true,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE recipients ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT '';
+ALTER TABLE recipients ADD COLUMN IF NOT EXISTS leads INTEGER NOT NULL DEFAULT 0;
 
 -- Referring source id -> name.
 --
@@ -231,8 +244,17 @@ CREATE TABLE IF NOT EXISTS status_events (
     -- Set once a message has gone out for this change.
     notified_at    TIMESTAMPTZ,
     notified_via   TEXT        NOT NULL DEFAULT '',
-    notified_to    TEXT        NOT NULL DEFAULT ''
+    notified_to    TEXT        NOT NULL DEFAULT '',
+
+    -- When a lead moves twice before anything goes out, only the newest
+    -- status is worth sending: the source wants to know where the lead IS,
+    -- not to receive a transcript. The older ones are closed against the
+    -- event that was sent instead, so the history still shows every move and
+    -- says plainly which one was reported.
+    superseded_by  BIGINT
 );
+
+ALTER TABLE status_events ADD COLUMN IF NOT EXISTS superseded_by BIGINT;
 
 ALTER TABLE status_events ADD COLUMN IF NOT EXISTS amount TEXT NOT NULL DEFAULT '';
 

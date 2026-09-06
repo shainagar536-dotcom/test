@@ -15,6 +15,8 @@ import { recordDelivery } from '../src/webhook/lead-updated.js';
 import { enrichEvent, enrichPending, SOURCE_STATE } from '../src/events/enrich.js';
 import { buildEventOutbox, SKIP } from '../src/notify/outbox.js';
 import { SurenseClient } from '../src/surense.js';
+import { SEED_TEMPLATES as SEED_TEMPLATES_FOR_TEST } from '../src/notify/seeds.js';
+import { normalizeText } from '../src/mirror.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ??
   'postgresql://postgres@127.0.0.1:5433/surense';
@@ -621,4 +623,212 @@ test('a template with a misspelled placeholder is held, not sent', async () => {
   assert.equal(outbox.readyToSend, 0);
   assert.equal(Object.keys(outbox.skipped)[0], 'message-has-an-unfilled-value');
   assert.deepEqual(outbox.skipped['message-has-an-unfilled-value'].examples, ['{clinet}']);
+});
+
+// ------------------------------------------- more than one change per lead
+
+test('only the newest status is sent when a lead moves twice', async () => {
+  // A lead going 'לא ענה' then 'לא עונה 2' in one afternoon is ordinary. The
+  // source wants to know where the lead IS, not to receive a transcript that
+  // ends where one message would have arrived.
+  const older = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  const newer = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'לא ענה',
+    statusAfter: 'לא עונה 2', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T14:00:00Z'
+  });
+
+  for (const status of ['לא ענה', 'לא עונה 2']) {
+    await db.saveTemplate({ status, message: `נוסח ${status}` });
+  }
+
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 1);
+  assert.equal(outbox.messages[0].eventId, newer.id);
+  assert.equal(outbox.messages[0].status, 'לא עונה 2');
+
+  // The older one is reported as superseded, naming what went instead.
+  assert.deepEqual(outbox.skipped['a-newer-status-was-sent-instead'].examples,
+    ['לא עונה 2']);
+  assert.ok(!outbox.messages.some(m => m.eventId === older.id));
+});
+
+test('the older changes are closed against the one that was sent', async () => {
+  const older = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'חדש', statusAfter: 'לא ענה',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+  const middle = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'לא ענה', statusAfter: 'לא עונה 2',
+    occurredAt: '2026-09-06T11:00:00Z'
+  });
+  const newest = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'לא עונה 2', statusAfter: 'לא עונה 3',
+    occurredAt: '2026-09-06T14:00:00Z'
+  });
+
+  // A different lead's pending event must not be touched.
+  const other = await db.recordStatusEvent({
+    leadId: 'other-lead', statusBefore: 'חדש', statusAfter: 'לא ענה',
+    occurredAt: '2026-09-06T10:00:00Z'
+  });
+
+  const result = await (await call('/api/events/notified', {
+    method: 'POST',
+    body: JSON.stringify({ ids: [newest.id], via: 'email', to: 'roi@example.com' })
+  })).json();
+
+  assert.deepEqual(result.claimed, [newest.id]);
+  assert.equal(result.superseded, 2);
+
+  const rows = await db.listStatusEvents({});
+  const byId = new Map(rows.map(row => [Number(row.id), row]));
+
+  // The history keeps every move, and says which one was reported.
+  assert.equal(byId.get(older.id).superseded_by, newest.id);
+  assert.equal(byId.get(older.id).notified_via, 'superseded');
+  assert.equal(byId.get(middle.id).superseded_by, newest.id);
+
+  assert.equal(byId.get(newest.id).notified_via, 'email');
+  assert.equal(byId.get(newest.id).superseded_by, null);
+
+  // Untouched, because it belongs to another lead.
+  assert.equal(byId.get(other.id).notified_at, null);
+});
+
+test('a superseded row reads as such, not as sent and not as blocked', async () => {
+  const older = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-06T09:00:00Z'
+  });
+  const newest = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'לא ענה',
+    statusAfter: 'לא עונה 2', occurredAt: '2026-09-06T14:00:00Z'
+  });
+
+  await db.markEventsNotified([newest.id], 'email', 'roi@example.com');
+
+  const body = await (await call('/api/dashboard/events')).json();
+  const byId = new Map(body.events.map(e => [e.id, e]));
+
+  assert.equal(byId.get(older.id).handled.state, 'superseded');
+  assert.equal(byId.get(older.id).handled.label, 'נשלח הסטטוס העדכני');
+  assert.equal(byId.get(newest.id).handled.state, 'sent');
+});
+
+// -------------------------------------------------- the channel per source
+
+test('the source decides the channel, not the wording', async () => {
+  await db.recordStatusEvent({
+    leadId: 'w', customerName: 'א', statusBefore: 'חדש', statusAfter: 'לא ענה',
+    sourceName: 'סוכן וואטסאפ', sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  // The template's own channel says email; the source is reached on WhatsApp.
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1', channel: 'email' });
+  await db.saveRecipient({
+    sourceKey: 'סוכן וואטסאפ', sourceName: 'סוכן וואטסאפ',
+    whatsapp: '+972542471430', channel: 'whatsapp', active: true
+  });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 1);
+  assert.equal(outbox.messages[0].channel, 'whatsapp');
+  assert.equal(outbox.messages[0].to, '+972542471430');
+});
+
+test('the log shows the channel a message would use before it is sent', async () => {
+  await db.recordStatusEvent({
+    leadId: 'w', customerName: 'א', statusBefore: 'חדש', statusAfter: 'לא ענה',
+    sourceName: 'סוכן וואטסאפ', sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({
+    sourceKey: 'סוכן וואטסאפ', sourceName: 'סוכן וואטסאפ',
+    whatsapp: '+972542471430', channel: 'whatsapp', active: true
+  });
+
+  const body = await (await call('/api/dashboard/events')).json();
+
+  assert.equal(body.events[0].display.channel, 'וואטסאפ');
+  assert.equal(body.events[0].handled.state, 'pending');
+});
+
+// ---------------------------------------------------- the shipped lists
+
+test('the recipient list is seeded once and then owned by the dashboard', async () => {
+  const { SEED_RECIPIENTS } = await import('../src/notify/recipients-seed.js');
+
+  const written = await db.seedRecipients(SEED_RECIPIENTS);
+  assert.equal(written, SEED_RECIPIENTS.length);
+
+  // A second boot must not undo an address corrected in the dashboard.
+  await db.saveRecipient({
+    sourceKey: normalizeText(SEED_RECIPIENTS[0].sourceName),
+    sourceName: SEED_RECIPIENTS[0].sourceName,
+    email: 'corrected@example.com', channel: 'email', active: true
+  });
+
+  assert.equal(await db.seedRecipients(SEED_RECIPIENTS), 0);
+
+  const rows = await db.listRecipients();
+  const corrected = rows.find(r =>
+    normalizeText(r.source_name) === normalizeText(SEED_RECIPIENTS[0].sourceName));
+
+  assert.equal(corrected.email, 'corrected@example.com');
+});
+
+test('a source with no address is kept, silent and visible', async () => {
+  const { SEED_RECIPIENTS } = await import('../src/notify/recipients-seed.js');
+  await db.seedRecipients(SEED_RECIPIENTS);
+
+  const body = await (await call('/api/dashboard/recipients')).json();
+
+  assert.equal(body.total, SEED_RECIPIENTS.length);
+  assert.ok(body.email > 90);
+  assert.ok(body.whatsapp > 20);
+
+  // Real sources with real volume that nobody has an address for. Dropping
+  // them would make them look like an oversight instead of a known gap.
+  assert.ok(body.noAddress > 0);
+
+  const campaign = body.recipients.find(r => r.source_name === 'קמפיין');
+  assert.equal(campaign.channel, '');
+  assert.equal(campaign.leads, 485);
+});
+
+test('the policy tab reports wording that contradicts the muted list', async () => {
+  await db.seedTemplates(SEED_TEMPLATES_FOR_TEST);
+
+  // 'חדש' is muted. Wording for it would send, so the contradiction is named.
+  await db.saveTemplate({ status: 'חדש', message: 'לא אמור לצאת' });
+
+  const body = await (await call('/api/dashboard/policy')).json();
+
+  assert.ok(body.muted.includes('חדש'));
+  assert.deepEqual(body.conflicts, ['חדש']);
+});
+
+test('an edited template is marked as differing from the shipped one', async () => {
+  await db.seedTemplates(SEED_TEMPLATES_FOR_TEST);
+  await db.saveTemplate({ status: 'לא ענה', message: 'נוסח חדש שלי' });
+
+  const body = await (await call('/api/dashboard/policy')).json();
+  const row = body.templates.find(t => t.status === 'לא ענה');
+
+  assert.equal(row.edited, true);
+  assert.equal(row.shipped, 'ניסינו ליצור קשר עם הלקוח אין מענה 1');
 });

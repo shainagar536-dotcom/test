@@ -38,7 +38,12 @@ export const SKIP = {
   // {total}, the "סך הכל" amount the CRM does not expose. Sending
   // "הוגשו החזרים בסך {total}" to a partner is worse than sending nothing,
   // and worse than either is not knowing it happened.
-  unfilled: 'message-has-an-unfilled-value'
+  unfilled: 'message-has-an-unfilled-value',
+
+  // The lead moved again before anything went out. Only the newest status is
+  // worth sending — the source wants to know where the lead is, not to be
+  // handed a transcript — so the older ones are closed against it.
+  superseded: 'a-newer-status-was-sent-instead'
 };
 
 /** A placeholder still sitting in the text after filling. */
@@ -256,6 +261,22 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
   const ready = [];
   const skipped = [];
 
+  // One message per lead, for the status it is on now. Two moves between two
+  // runs of the sender is ordinary — a lead goes 'לא ענה' then 'לא עונה 2' in
+  // an afternoon — and sending both would tell the source a story it does not
+  // need, ending on the same place one message would have reached.
+  const newestPerLead = new Map();
+
+  for (const event of events) {
+    const current = newestPerLead.get(event.lead_id);
+    const newer = !current ||
+      new Date(event.occurred_at) > new Date(current.occurred_at) ||
+      (String(event.occurred_at) === String(current.occurred_at) &&
+        Number(event.id) > Number(current.id));
+
+    if (newer) newestPerLead.set(event.lead_id, event);
+  }
+
   for (const event of events) {
     const status = event.status_after ?? '';
     const template = templates.get(normalizeText(status));
@@ -268,6 +289,14 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
       reason,
       detail: detail ?? null
     });
+
+    // Superseded by a later move of the same lead. Reported before anything
+    // else, because "an older status" is the whole reason it is not going
+    // out — not whatever else might also be true of it.
+    if (newestPerLead.get(event.lead_id)?.id !== event.id) {
+      skip(SKIP.superseded, String(newestPerLead.get(event.lead_id)?.status_after ?? ''));
+      continue;
+    }
 
     // The closed allowlist: a status nobody has written wording for sends
     // nothing, which keeps the statuses still being decided quiet rather than
@@ -292,7 +321,14 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     if (!recipient) { skip(SKIP.noRecipient, event.source_name); continue; }
     if (!recipient.active) { skip(SKIP.recipientOff, event.source_name); continue; }
 
-    const address = template.channel === 'whatsapp' ? recipient.whatsapp : recipient.email;
+    // How this source is reached is a property of the source, not of the
+    // wording: the same status goes to one partner by email and to another by
+    // WhatsApp. The template's channel is only a fallback for a row written
+    // before channels existed.
+    const channel = recipient.channel ||
+      (recipient.email ? 'email' : recipient.whatsapp ? 'whatsapp' : template.channel);
+
+    const address = channel === 'whatsapp' ? recipient.whatsapp : recipient.email;
     if (!address) { skip(SKIP.noAddress, event.source_name); continue; }
 
     // The amount is the one value whose absence changes what the sentence
@@ -331,7 +367,7 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     ready.push({
       eventId: Number(event.id),
       leadId: event.lead_id,
-      channel: template.channel,
+      channel,
       to: redirected ? messaging.redirectAllTo : address,
       intendedFor: redirected ? address : null,
       redirected,

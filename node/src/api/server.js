@@ -13,6 +13,7 @@ import { runSync, syncInProgress } from '../sync/run.js';
 import { buildEventOutbox, summarizeSkips } from '../notify/outbox.js';
 import { enrichPending, refreshSourceCatalog } from '../events/enrich.js';
 import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
+import { SEED_TEMPLATES, MUTED_STATUSES } from '../notify/seeds.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
 import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
@@ -640,10 +641,20 @@ export function createApi({ db, config, fetchImpl }) {
       return { status: 400, body: { error: 'Send {"ids": [1, 2, 3]}.' } };
     }
 
-    const { claimed, alreadyClaimed } = await db.markEventsNotified(
+    const { claimed, superseded, alreadyClaimed } = await db.markEventsNotified(
       ids, String(body.via ?? ''), String(body.to ?? ''));
 
-    return { requested: ids.length, claimed, alreadyClaimed };
+    return {
+      requested: ids.length,
+      claimed,
+
+      // Older unsent changes for the same leads, closed against the one that
+      // went out. Reported so a caller can see the queue shrink by more than
+      // it claimed and know why.
+      superseded,
+
+      alreadyClaimed
+    };
   });
 
   // Reloads the whole id -> name catalog in one call. This is the endpoint
@@ -708,6 +719,55 @@ export function createApi({ db, config, fetchImpl }) {
     return removed
       ? { deleted: true }
       : { status: 404, body: { error: 'No such source id.' } };
+  });
+
+  // The two tables the dashboard edits, with what the shipped list held, so
+  // an edit can be told from the default and reverted deliberately.
+  route('GET', /^\/api\/dashboard\/policy$/, async () => {
+    const templates = await db.listTemplates();
+    const shipped = new Map(SEED_TEMPLATES.map(t => [normalizeText(t.status), t.message]));
+
+    return {
+      templates: templates.map(row => ({
+        ...row,
+        shipped: shipped.get(normalizeText(row.status)) ?? null,
+        edited: shipped.has(normalizeText(row.status)) &&
+          shipped.get(normalizeText(row.status)) !== row.message
+      })),
+
+      // Statuses deliberately given no wording. Silence is the default
+      // anyway; this is what separates "decided" from "not written yet".
+      muted: MUTED_STATUSES,
+
+      // Wording that exists for a status on the muted list contradicts the
+      // policy, so it is surfaced rather than left to be noticed.
+      conflicts: templates
+        .filter(row => MUTED_STATUSES.some(m => normalizeText(m) === normalizeText(row.status)))
+        .map(row => row.status)
+    };
+  });
+
+  route('GET', /^\/api\/dashboard\/recipients$/, async (_request, _params, url) => {
+    const rows = await db.listRecipients();
+    const search = normalizeText(url.searchParams.get('search') ?? '');
+
+    const matching = search
+      ? rows.filter(row => normalizeText(row.source_name).includes(search) ||
+        normalizeText(row.email).includes(search) ||
+        normalizeText(row.whatsapp).includes(search))
+      : rows;
+
+    return {
+      total: rows.length,
+      email: rows.filter(row => row.channel === 'email').length,
+      whatsapp: rows.filter(row => row.channel === 'whatsapp').length,
+
+      // Real sources with real volume that nobody has an address for. These
+      // are silent by necessity, not by decision, and worth seeing.
+      noAddress: rows.filter(row => !row.channel).length,
+
+      recipients: matching
+    };
   });
 
   // ------------------------------------------------------------------- crm
@@ -871,6 +931,18 @@ export function createApi({ db, config, fetchImpl }) {
     const sendable = new Set(ready.map(item => item.eventId));
     const reasons = new Map(skipped.map(item => [item.eventId, item.reason]));
 
+    // How each one would go out, so the column reads "וואטסאפ" before the
+    // message is sent and not only after.
+    const planned = new Map(ready.map(item => [item.eventId, item.channel]));
+
+    const byName = new Map(recipientRows.map(row => [row.source_key, row]));
+    for (const event of events) {
+      if (planned.has(Number(event.id)) || !event.source_name) continue;
+
+      const recipient = byName.get(normalizeText(event.source_name));
+      if (recipient?.channel) planned.set(Number(event.id), recipient.channel);
+    }
+
     return {
       total: await db.countStatusEvents(query),
       limit,
@@ -879,7 +951,7 @@ export function createApi({ db, config, fetchImpl }) {
       counts,
       recipients: recipientRows.length,
       redirectAllTo: config.messaging.redirectAllTo || null,
-      events: events.map(event => describeEvent(event, sendable, reasons))
+      events: events.map(event => describeEvent(event, sendable, reasons, planned))
     };
   });
 

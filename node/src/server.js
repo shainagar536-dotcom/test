@@ -14,6 +14,7 @@ import { Database } from './db/index.js';
 import { createApi } from './api/server.js';
 import { runSync } from './sync/run.js';
 import { SEED_TEMPLATES } from './notify/seeds.js';
+import { SEED_RECIPIENTS } from './notify/recipients-seed.js';
 
 const config = loadConfig();
 const db = new Database(config.database);
@@ -24,6 +25,9 @@ await db.migrate();
 // never overwritten by a later deploy.
 const seeded = await db.seedTemplates(SEED_TEMPLATES);
 if (seeded) console.log(`Seeded ${seeded} status templates.`);
+
+const seededRecipients = await db.seedRecipients(SEED_RECIPIENTS);
+if (seededRecipients) console.log(`Seeded ${seededRecipients} recipients.`);
 
 console.log('Database ready.');
 

@@ -243,6 +243,7 @@ export const DELIVERY_LABELS = {
   'source-not-in-recipients': 'המקור לא נמצא בטבלת הנמענים',
   'source-not-looked-up-yet': 'המקור עוד לא נבדק מול ה-CRM',
   'message-has-an-unfilled-value': 'חסר ערך בנוסח (סך הכל) — לא נשלח',
+  'a-newer-status-was-sent-instead': 'נשלח במקומו הסטטוס העדכני',
   'recipient-inactive': 'הנמען מושבת',
   'recipient-has-no-address': 'לנמען אין כתובת'
 };
@@ -275,6 +276,9 @@ export const EVENT_LABELS = {
 export const CHANNEL_LABELS = { email: 'מייל', whatsapp: 'וואטסאפ' };
 
 /** How a source lookup ended up, in Hebrew. */
+/** The intended channel, before anything has gone out. */
+export const PLANNED_CHANNEL_LABELS = CHANNEL_LABELS;
+
 export const SOURCE_STATE_LABELS = {
   pending: 'בבדיקה',
   resolved: 'נמצא',
@@ -294,10 +298,22 @@ export const SOURCE_STATE_LABELS = {
  * @param {Map<number, string>} reasons
  * @returns {object}
  */
-export function describeEvent(event, sendable, reasons) {
+export function describeEvent(event, sendable, reasons, planned = new Map()) {
   const id = Number(event.id);
 
-  const handled = event.notified_at
+  // Closed because a later status went out in its place. Not "sent", because
+  // nothing was sent for this row, and not "blocked", because nothing is
+  // wrong — the source was told where the lead actually is.
+  const handled = event.superseded_by
+    ? {
+      state: 'superseded',
+      label: 'נשלח הסטטוס העדכני',
+      reason: null,
+      at: formatDate(event.notified_at),
+      via: null,
+      to: null
+    }
+    : event.notified_at
     ? {
       state: 'sent',
       label: DELIVERY_LABELS.sent,
@@ -332,10 +348,12 @@ export function describeEvent(event, sendable, reasons) {
       source_name: event.source_name ||
         SOURCE_STATE_LABELS[event.source_state] || '',
 
-      // What it actually went out on, which is only known once it has.
-      channel: event.notified_via
+      // What it went out on once it has, and how it would go out before
+      // then — so the column answers "email or WhatsApp" for every row, not
+      // only for the ones already sent.
+      channel: event.notified_via && event.notified_via !== 'superseded'
         ? (CHANNEL_LABELS[event.notified_via] ?? event.notified_via)
-        : ''
+        : (CHANNEL_LABELS[planned.get(id)] ?? planned.get(id) ?? '')
     },
     sourceState: event.source_state,
     sourceStateLabel: SOURCE_STATE_LABELS[event.source_state] ?? event.source_state,
