@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>מראה הלידים</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>%F0%9F%93%8B</text></svg>">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --line: #e2e5ea;
+    --ink: #16191d;
+    --muted: #6b7280;
+    --accent: #2f5bd8;
+    --sent: #0f7b4f;
+    --sent-bg: #e4f5ec;
+    --open: #a4601a;
+    --open-bg: #fdf1de;
+    --blocked: #a5322c;
+    --blocked-bg: #fbe9e8;
+    --none: #6b7280;
+    --none-bg: #eef0f3;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c;
+      --panel: #1b1f26;
+      --line: #2c323c;
+      --ink: #e8eaed;
+      --muted: #9aa3af;
+      --accent: #7ea0f5;
+      --sent: #6edaa6;      --sent-bg: #12301f;
+      --open: #f0c27a;      --open-bg: #33260f;
+      --blocked: #f19d97;   --blocked-bg: #341917;
+      --none: #9aa3af;      --none-bg: #232830;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 "Segoe UI", Rubik, Arial, sans-serif;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 20;
+  }
+
+  h1 { font-size: 17px; margin: 0; font-weight: 650; }
+
+  .spacer { flex: 1; }
+
+  button, select, input {
+    font: inherit; color: inherit;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 11px;
+  }
+
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  button.primary {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  main { padding: 18px 20px 60px; }
+
+  .cards {
+    display: grid; gap: 12px; margin-bottom: 18px;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 11px; padding: 13px 15px;
+  }
+
+  .card .n { font-size: 25px; font-weight: 680; letter-spacing: -.5px; }
+  .card .t { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .card .sub { color: var(--muted); font-size: 11.5px; margin-top: 5px; }
+
+  .filters {
+    display: flex; gap: 9px; flex-wrap: wrap; align-items: center;
+    margin-bottom: 14px;
+  }
+
+  .filters input[type=search] { min-width: 230px; }
+
+  .tablewrap {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 11px; overflow-x: auto;
+  }
+
+  table { border-collapse: collapse; width: 100%; white-space: nowrap; }
+
+  th, td {
+    text-align: right; padding: 9px 13px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  th {
+    position: sticky; top: 0; background: var(--panel);
+    font-size: 12.5px; font-weight: 640; color: var(--muted);
+    border-bottom-width: 2px;
+  }
+
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  .b-sent    { color: var(--sent);    background: var(--sent-bg); }
+  .b-pending { color: var(--open);    background: var(--open-bg); }
+  .b-blocked { color: var(--blocked); background: var(--blocked-bg); }
+  .b-none    { color: var(--none);    background: var(--none-bg); }
+
+  .why { color: var(--muted); font-size: 11.5px; margin-top: 2px; white-space: normal; }
+
+  .pager {
+    display: flex; gap: 10px; align-items: center; justify-content: center;
+    margin-top: 15px; color: var(--muted);
+  }
+
+  .empty, .loading { padding: 44px; text-align: center; color: var(--muted); }
+
+  .error {
+    background: var(--blocked-bg); color: var(--blocked);
+    border: 1px solid currentColor; border-radius: 9px;
+    padding: 11px 14px; margin-bottom: 14px; white-space: pre-wrap;
+  }
+
+  /* token gate */
+  #gate {
+    position: fixed; inset: 0; z-index: 50;
+    background: var(--bg);
+    display: grid; place-items: center; padding: 20px;
+  }
+  #gate .box {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 13px; padding: 26px; max-width: 430px; width: 100%;
+  }
+  #gate h2 { margin: 0 0 8px; font-size: 17px; }
+  #gate p { color: var(--muted); margin: 0 0 16px; font-size: 13px; }
+  #gate input { width: 100%; margin-bottom: 11px; font-family: ui-monospace, monospace; }
+
+  /* detail drawer */
+  #drawer {
+    position: fixed; inset-block: 0; inset-inline-start: 0;
+    width: min(560px, 100%); z-index: 40;
+    background: var(--panel); border-inline-end: 1px solid var(--line);
+    box-shadow: 0 0 40px rgba(0,0,0,.22);
+    display: flex; flex-direction: column;
+  }
+  #drawer header { position: static; }
+  #drawer .body { overflow-y: auto; padding: 6px 20px 30px; }
+  #drawer table { white-space: normal; }
+  #drawer td:first-child { color: var(--muted); width: 44%; font-size: 13px; }
+  #drawer h3 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); margin: 20px 0 6px;
+  }
+
+  [hidden] { display: none !important; }
+
+  /* A phone number or a UUID is left-to-right text sitting in a right-to-left
+     page. Without this the browser moves the leading + to the end, so
+     +972545541400 is shown — and read out to a customer — as 972545541400+. */
+  .ltr { display: inline-block; direction: ltr; text-align: left; }
+
+  .cols {
+    position: absolute; z-index: 30; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+    max-height: 420px; overflow-y: auto; box-shadow: 0 8px 26px rgba(0,0,0,.16);
+    columns: 2; column-gap: 20px;
+  }
+  .cols label {
+    display: block; padding: 3px 0; font-size: 13px;
+    break-inside: avoid; cursor: pointer; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<div id="gate" hidden>
+  <div class="box">
+    <h2>מראה הלידים</h2>
+    <p>הדף לא מחזיק נתונים בעצמו. הדבק את ה-API_TOKEN כדי לקרוא מהשרת. הוא נשמר לשונית הזו בלבד ולא נשלח לשום מקום אחר.</p>
+    <input id="tokenInput" type="password" placeholder="API_TOKEN" autocomplete="off" spellcheck="false">
+    <div id="gateError" class="error" hidden></div>
+    <button class="primary" id="gateGo" style="width:100%">כניסה</button>
+  </div>
+</div>
+
+<header>
+  <h1>מראה הלידים</h1>
+  <span id="stamp" class="card-sub" style="color:var(--muted);font-size:12px"></span>
+  <span class="spacer"></span>
+  <button id="colsBtn">עמודות</button>
+  <button id="refresh">רענון</button>
+  <button id="logout">ניתוק</button>
+</header>
+
+<main>
+  <div id="err" class="error" hidden></div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="filters">
+    <input type="search" id="q" placeholder="שם, מספר ליד, טלפון או ת.ז">
+    <select id="delivery">
+      <option value="all">הכול</option>
+      <option value="open">לא טופל</option>
+      <option value="sent">נשלח</option>
+      <option value="none">אין שינוי סטטוס</option>
+    </select>
+    <select id="status"><option value="">כל הסטטוסים</option></select>
+    <select id="assignee"><option value="">כל המטפלים</option></select>
+    <select id="limit">
+      <option value="25">25 בעמוד</option>
+      <option value="50" selected>50 בעמוד</option>
+      <option value="100">100 בעמוד</option>
+      <option value="250">250 בעמוד</option>
+    </select>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr id="head"></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="state" class="loading">טוען…</div>
+  </div>
+
+  <div class="pager">
+    <button id="prev">הקודם</button>
+    <span id="range"></span>
+    <button id="next">הבא</button>
+  </div>
+</main>
+
+<div id="drawer" hidden>
+  <header>
+    <h1 id="dTitle">ליד</h1>
+    <span class="spacer"></span>
+    <button id="dClose">סגירה</button>
+  </header>
+  <div class="body" id="dBody"></div>
+</div>
+
+<div id="colsPanel" class="cols" hidden></div>
+
+<script>
+const KEY_TOKEN = 'surense.token';
+const KEY_COLS  = 'surense.columns';
+
+const state = {
+  token: '', offset: 0, limit: 50,
+  q: '', delivery: 'all', status: '', assignee: '',
+  columns: [], allColumns: [], total: 0, leads: []
+};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+
+const HEBREW = /[\u0590-\u05FF]/;
+
+// Values with no Hebrew in them are latin text — a phone, an email, a UUID, a
+// date — and must be marked as such or the page reorders their punctuation.
+const val = v => {
+  const text = String(v ?? '');
+  if (!text) return '';
+
+  return HEBREW.test(text) ? esc(text) : '<span class="ltr">' + esc(text) + '</span>';
+};
+
+function readStored(key) {
+  try { return sessionStorage.getItem(key) ?? localStorage.getItem(key); }
+  catch { return null; }
+}
+function store(key, value, session) {
+  try { (session ? sessionStorage : localStorage).setItem(key, value); } catch {}
+}
+
+async function api(path) {
+  const response = await fetch(path, {
+    headers: { Authorization: 'Bearer ' + state.token }
+  });
+
+  if (response.status === 401) {
+    const error = new Error('הטוקן נדחה.');
+    error.unauthorized = true;
+    throw error;
+  }
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || ('שגיאה ' + response.status));
+
+  return body;
+}
+
+// ------------------------------------------------------------------ gate
+
+function openGate(message) {
+  $('gate').hidden = false;
+  $('gateError').hidden = !message;
+  $('gateError').textContent = message || '';
+  $('tokenInput').focus();
+}
+
+$('gateGo').onclick = async () => {
+  const value = $('tokenInput').value.trim();
+  if (!value) return;
+
+  state.token = value;
+
+  try {
+    await api('/api/dashboard/filters');
+    store(KEY_TOKEN, value, true);
+    $('gate').hidden = true;
+    boot();
+  } catch (error) {
+    openGate(error.unauthorized ? 'הטוקן נדחה. בדוק שהעתקת אותו במלואו.' : error.message);
+  }
+};
+
+$('tokenInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('gateGo').click(); });
+
+$('logout').onclick = () => {
+  try { sessionStorage.removeItem(KEY_TOKEN); } catch {}
+  state.token = '';
+  $('tokenInput').value = '';
+  openGate('');
+};
+
+// --------------------------------------------------------------- rendering
+
+function badge(handled) {
+  const cls = { sent:'b-sent', pending:'b-pending', blocked:'b-blocked', none:'b-none' }[handled.state];
+  let html = '<span class="badge ' + cls + '">' + esc(handled.label) + '</span>';
+
+  if (handled.reason) html += '<div class="why">' + esc(handled.reason) + '</div>';
+  else if (handled.state === 'sent' && handled.at)
+    html += '<div class="why">' + esc(handled.at) + (handled.via ? ' · ' + esc(handled.via) : '') + '</div>';
+
+  return html;
+}
+
+function renderCards(summary) {
+  const card = (n, t, sub) =>
+    '<div class="card"><div class="n">' + n + '</div><div class="t">' + t + '</div>' +
+    (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
+
+  $('cards').innerHTML =
+    card(summary.leads.toLocaleString('he-IL'), 'לידים במסד') +
+    card(summary.openLeads.toLocaleString('he-IL'), 'לידים שלא טופלו',
+         summary.openChanges.toLocaleString('he-IL') + ' שינויי סטטוס ממתינים') +
+    card(summary.sentLeads.toLocaleString('he-IL'), 'לידים שנשלחו',
+         summary.sentChanges.toLocaleString('he-IL') + ' הודעות שיצאו') +
+    card(summary.unresolvedSources.toLocaleString('he-IL'), 'מקורות בלי שם',
+         summary.unresolvedLeads.toLocaleString('he-IL') + ' לידים חסומים בגללם') +
+    card(summary.recipients.toLocaleString('he-IL'), 'נמענים מוגדרים',
+         summary.redirectAllTo ? 'פיילוט: הכול ל־' + esc(summary.redirectAllTo) : 'שליחה חיה');
+}
+
+function renderTable() {
+  const cols = state.columns;
+
+  $('head').innerHTML =
+    cols.map(c => '<th>' + esc(labelOf(c)) + '</th>').join('') +
+    '<th>מקור מפנה</th><th>טופל</th>';
+
+  $('rows').innerHTML = state.leads.map((lead, i) =>
+    '<tr data-i="' + i + '">' +
+    cols.map(c => '<td>' + val(lead.display[c]) + '</td>').join('') +
+    '<td>' + esc(lead.sourceName || '—') + '</td>' +
+    '<td>' + badge(lead.handled) + '</td>' +
+    '</tr>').join('');
+
+  for (const tr of $('rows').querySelectorAll('tr')) {
+    tr.onclick = () => openDrawer(state.leads[Number(tr.dataset.i)]);
+  }
+
+  const from = state.total ? state.offset + 1 : 0;
+  const to = Math.min(state.offset + state.limit, state.total);
+
+  $('range').textContent = from + '–' + to + ' מתוך ' + state.total.toLocaleString('he-IL');
+  $('prev').disabled = state.offset === 0;
+  $('next').disabled = to >= state.total;
+
+  $('state').hidden = state.leads.length > 0;
+  if (!state.leads.length) {
+    $('state').className = 'empty';
+    $('state').textContent = 'אין לידים שמתאימים לסינון.';
+  }
+}
+
+let LABELS = {};
+const labelOf = key => LABELS[key] ?? key;
+
+function openDrawer(lead) {
+  $('dTitle').textContent = lead.display.fullName || lead.id;
+
+  const rows = state.allColumns
+    .filter(c => (lead.display[c] ?? '') !== '')
+    .map(c => '<tr><td>' + esc(labelOf(c)) + '</td><td>' + val(lead.display[c]) + '</td></tr>')
+    .join('');
+
+  $('dBody').innerHTML =
+    '<h3>מצב שליחה</h3><table><tr><td>טופל</td><td>' + badge(lead.handled) + '</td></tr>' +
+    '<tr><td>מקור מפנה</td><td>' + esc(lead.sourceName || '—') + '</td></tr></table>' +
+    '<h3>שדות הליד</h3><table>' + rows + '</table>';
+
+  $('drawer').hidden = false;
+}
+
+$('dClose').onclick = () => { $('drawer').hidden = true; };
+
+// ----------------------------------------------------------- column picker
+
+function renderColumnPicker() {
+  $('colsPanel').innerHTML = state.allColumns.map(c =>
+    '<label><input type="checkbox" value="' + esc(c) + '"' +
+    (state.columns.includes(c) ? ' checked' : '') + '> ' + esc(labelOf(c)) + '</label>').join('');
+
+  for (const box of $('colsPanel').querySelectorAll('input')) {
+    box.onchange = () => {
+      state.columns = state.allColumns.filter(c =>
+        $('colsPanel').querySelector('input[value="' + CSS.escape(c) + '"]').checked);
+
+      store(KEY_COLS, JSON.stringify(state.columns), false);
+      renderTable();
+    };
+  }
+}
+
+$('colsBtn').onclick = e => {
+  const panel = $('colsPanel');
+  panel.hidden = !panel.hidden;
+
+  if (!panel.hidden) {
+    const box = e.target.getBoundingClientRect();
+    panel.style.top = (box.bottom + 6) + 'px';
+    panel.style.insetInlineStart = Math.max(10, box.left) + 'px';
+    renderColumnPicker();
+  }
+};
+
+document.addEventListener('click', e => {
+  if (!$('colsPanel').contains(e.target) && e.target !== $('colsBtn')) $('colsPanel').hidden = true;
+});
+
+// ------------------------------------------------------------------ loading
+
+let timer;
+
+async function load() {
+  $('err').hidden = true;
+  $('state').hidden = false;
+  $('state').className = 'loading';
+  $('state').textContent = 'טוען…';
+
+  const query = new URLSearchParams({
+    limit: state.limit, offset: state.offset,
+    search: state.q, delivery: state.delivery,
+    status: state.status, assignee: state.assignee
+  });
+
+  try {
+    const data = await api('/api/dashboard/leads?' + query);
+
+    state.leads = data.leads;
+    state.total = data.total;
+
+    renderCards(data.summary);
+    renderTable();
+
+    $('stamp').textContent = 'עודכן ' + new Date().toLocaleTimeString('he-IL');
+  } catch (error) {
+    if (error.unauthorized) return openGate('הטוקן נדחה.');
+
+    $('state').hidden = true;
+    $('err').hidden = false;
+    $('err').textContent = error.message;
+  }
+}
+
+function reload(resetPage) {
+  if (resetPage) state.offset = 0;
+  clearTimeout(timer);
+  timer = setTimeout(load, 120);
+}
+
+$('q').oninput = () => { state.q = $('q').value.trim(); reload(true); };
+$('delivery').onchange = () => { state.delivery = $('delivery').value; reload(true); };
+$('status').onchange = () => { state.status = $('status').value; reload(true); };
+$('assignee').onchange = () => { state.assignee = $('assignee').value; reload(true); };
+$('limit').onchange = () => { state.limit = Number($('limit').value); reload(true); };
+$('refresh').onclick = () => load();
+$('prev').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); load(); };
+$('next').onclick = () => { state.offset += state.limit; load(); };
+
+async function boot() {
+  const meta = await api('/api/dashboard/filters');
+
+  LABELS = meta.labels;
+  state.allColumns = meta.columns;
+
+  let saved = null;
+  try { saved = JSON.parse(readStored(KEY_COLS) || 'null'); } catch {}
+
+  state.columns = Array.isArray(saved) && saved.length
+    ? saved.filter(c => meta.columns.includes(c))
+    : meta.defaultColumns;
+
+  const fill = (id, values, label) => {
+    $(id).innerHTML = '<option value="">' + label + '</option>' +
+      values.map(v => '<option value="' + esc(v.value) + '">' +
+        esc(v.value) + ' (' + v.leads + ')</option>').join('');
+  };
+
+  fill('status', meta.statuses, 'כל הסטטוסים');
+  fill('assignee', meta.assignees, 'כל המטפלים');
+
+  load();
+}
+
+const stored = readStored(KEY_TOKEN);
+
+if (stored) {
+  state.token = stored;
+  boot().catch(error => openGate(error.unauthorized ? '' : error.message));
+} else {
+  openGate('');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,251 @@
+/**
+ * Hebrew labels and display formatting for the CRM's own field keys.
+ *
+ * The mirror stores every field under the key the CRM uses, which is English
+ * and abbreviated — `statusName`, `assigneeName`, `cellNumber`. That is right
+ * for storage: a field renamed in Surense must not need a migration here. It
+ * is wrong for a screen somebody reads, so the translation lives here, at the
+ * edge, rather than in the data.
+ *
+ * A key with no entry falls back to the key itself. That is deliberate: a
+ * field added in the CRM shows up on the dashboard immediately, untranslated
+ * and visible, instead of vanishing until someone adds a label.
+ */
+
+/** CRM field key -> Hebrew label. */
+export const LABELS = {
+  // --- identity
+  id: 'מזהה ליד',
+  number: 'מספר ליד',
+  version: 'גרסה',
+  tenantId: 'מזהה ארגון',
+  agencyId: 'מזהה סוכנות',
+
+  // --- the customer
+  fullName: 'שם הלקוח',
+  fullNameReverse: 'שם הלקוח (הפוך)',
+  firstName: 'שם פרטי',
+  lastName: 'שם משפחה',
+  customerFullName: 'שם הלקוח בכרטיס',
+  customerFullNameReverse: 'שם הלקוח בכרטיס (הפוך)',
+  customerId: 'מזהה לקוח',
+  birthDate: 'תאריך לידה',
+  idNumber: 'מספר זהות',
+  idType: 'סוג מסמך זיהוי',
+  idCardIssueDate: 'תאריך הנפקת ת.ז',
+  age: 'גיל',
+  monthlyIncome: 'הכנסה חודשית',
+  street: 'כתובת',
+
+  // --- contact
+  cellNumber: 'טלפון נייד',
+  phoneNumber: 'טלפון נוסף',
+  phoneNumber1: 'טלפון 1',
+  phoneNumber2: 'טלפון 2',
+  email: 'דוא"ל',
+  appMailAddress: 'כתובת דואר במערכת',
+  contactPointCount: 'מספר אנשי קשר',
+
+  // --- status
+  statusName: 'סטטוס',
+  statusId: 'מזהה סטטוס',
+  statusDate: 'תאריך סטטוס',
+  statusClosed: 'סטטוס סגור',
+  statusSuccess: 'סטטוס מוצלח',
+  customerStatusId: 'מזהה סטטוס לקוח',
+  lastStatusUpdateBy: 'סטטוס עודכן על ידי',
+  closedDate: 'תאריך סגירה',
+  closedReason: 'סיבת סגירה',
+  successDate: 'תאריך הצלחה',
+
+  // --- the referring source
+  sourceId: 'מזהה מקור מפנה',
+
+  // --- who handles it
+  ownerName: 'בעלים',
+  ownerId: 'מזהה בעלים',
+  assigneeName: 'מטפל',
+  assigneeId: 'מזהה מטפל',
+  assignedUserName: 'משויך למשתמש',
+  assignedUserId: 'מזהה משתמש משויך',
+  assignedAt: 'תאריך שיוך',
+  assignedBy: 'שויך על ידי',
+  creatorName: 'נוצר על ידי',
+  createdBy: 'מזהה יוצר',
+  createdDate: 'תאריך יצירה',
+  customerManagerId: 'מזהה מנהל לקוח',
+  customerManagers: 'מנהלי לקוח',
+  lastModifiedBy: 'שונה לאחרונה על ידי',
+  lastModifiedDate: 'תאריך שינוי אחרון',
+  lastActivityBy: 'פעילות אחרונה על ידי',
+  lastActivityDate: 'תאריך פעילות אחרונה',
+
+  // --- the product
+  interestName: 'תחום עניין',
+  interestId: 'מזהה תחום עניין',
+  typeId: 'מזהה סוג ליד',
+
+  // --- meetings
+  meetingDate: 'תאריך פגישה',
+  meetingCoordinatedByName: 'פגישה תואמה על ידי',
+  meetingCoordinatedById: 'מזהה מתאם פגישה',
+  meetingCoordinatedDate: 'תאריך תיאום פגישה',
+  meetingFirstScheduledByName: 'פגישה ראשונה נקבעה על ידי',
+  meetingFirstScheduledById: 'מזהה קובע פגישה ראשונה',
+  meetingFirstScheduledDate: 'תאריך קביעת פגישה ראשונה',
+
+  // --- workflow
+  dueAt: 'תאריך יעד',
+  dueDate: 'תאריך יעד (יום)',
+  dueAtTimeSet: 'נקבעה שעה ליעד',
+  overduePeriod: 'פיגור',
+  priority: 'עדיפות',
+  unseen: 'לא נצפה',
+  sharable: 'ניתן לשיתוף',
+  existingLead: 'ליד קיים',
+  documentCount: 'מספר מסמכים',
+  checkLists: 'רשימות משימות',
+  notes: 'הערות',
+  tags: 'תגיות',
+  customFields: 'שדות מותאמים',
+  mailingStatus: 'סטטוס דיוור'
+};
+
+/**
+ * Columns shown before the reader picks anything.
+ *
+ * Seventy-eight columns at once is not a table anybody reads. These are the
+ * ones that answer "who is this, where did they come from, who handles them,
+ * and what happened" — the rest stay one click away.
+ */
+export const DEFAULT_COLUMNS = [
+  'number', 'fullName', 'statusName', 'statusDate',
+  'assigneeName', 'interestName', 'cellNumber'
+];
+
+/** Keys that are internal plumbing rather than anything to read. */
+export const TECHNICAL = new Set([
+  'tenantId', 'agencyId', 'customerStatusId', 'sharable', 'unseen',
+  'appMailAddress', 'fullNameReverse', 'customerFullNameReverse', 'version'
+]);
+
+const DATE_KEY = /(date|dueat|assignedat)$/i;
+
+/**
+ * @param {string} key
+ * @returns {string}
+ */
+export function labelFor(key) {
+  return LABELS[key] ?? key;
+}
+
+/**
+ * Renders one stored value for display.
+ *
+ * The mirror flattens everything to a scalar for storage, which leaves a few
+ * shapes that are correct but unreadable: a JSON blob carrying a code and its
+ * description, a phone number with the apostrophe that stops a spreadsheet
+ * treating +972 as a formula, an ISO duration. Each is unwrapped here rather
+ * than in the data, so the stored value stays exactly what the CRM sent.
+ *
+ * @param {string} key
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function formatValue(key, value) {
+  if (value === null || value === undefined || value === '') return '';
+
+  if (typeof value === 'boolean') return value ? 'כן' : 'לא';
+
+  const text = String(value);
+
+  // The mirror prefixes a leading = + - @ with an apostrophe so a spreadsheet
+  // keeps it as text. On screen that apostrophe is noise.
+  const unescaped = text.startsWith("'") ? text.slice(1) : text;
+
+  if (unescaped === 'true') return 'כן';
+  if (unescaped === 'false') return 'לא';
+
+  // {"code":1,"description":"ת.ז"} — the description is the whole point.
+  if (unescaped.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(unescaped);
+      if (parsed?.description) return String(parsed.description);
+    } catch {
+      // Not JSON after all; fall through and show it as it is.
+    }
+  }
+
+  // ISO 8601 duration, negative when overdue: P-26D is 26 days late.
+  const overdue = /^P(-?\d+)D$/.exec(unescaped);
+  if (overdue) {
+    const days = Number(overdue[1]);
+    return days < 0 ? `באיחור ${Math.abs(days)} ימים` : `בעוד ${days} ימים`;
+  }
+
+  if (DATE_KEY.test(key)) return formatDate(unescaped);
+
+  return unescaped;
+}
+
+/**
+ * Formats a stored timestamp for a Hebrew reader, in Israel time.
+ *
+ * The stored value is UTC. Rendering it raw would show a status set at 17:05
+ * local as 14:05, which reads as the CRM being wrong rather than the display.
+ *
+ * @param {string} value
+ * @param {string} [timeZone]
+ * @returns {string}
+ */
+export function formatDate(value, timeZone = 'Asia/Jerusalem') {
+  const text = String(value).trim();
+  if (!text) return '';
+
+  // A plain date carries no time; showing one would invent precision, and
+  // shifting it by a zone could move it a day.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const [year, month, day] = text.split('-');
+    return `${day}/${month}/${year}`;
+  }
+
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+
+  return `${parts.day}/${parts.month}/${parts.year} ${parts.hour}:${parts.minute}`;
+}
+
+/**
+ * Hebrew for each delivery state and skip reason.
+ *
+ * The reasons are the outbox's own strings, so the dashboard cannot drift
+ * from what the sender actually decided — it is translating that decision,
+ * not re-deriving it.
+ */
+export const DELIVERY_LABELS = {
+  sent: 'נשלח',
+  pending: 'ממתין לשליחה',
+  blocked: 'לא יישלח',
+  none: 'אין שינוי סטטוס',
+
+  'no-template': 'אין נוסח לסטטוס הזה',
+  'template-inactive': 'הנוסח מושבת',
+  'lead-has-no-source': 'לליד אין מקור מפנה',
+  'source-id-not-mapped': 'מזהה המקור לא ממופה לשם',
+  'source-not-in-recipients': 'המקור לא נמצא בטבלת הנמענים',
+  'recipient-inactive': 'הנמען מושבת',
+  'recipient-has-no-address': 'לנמען אין כתובת'
+};
+
+/** @param {string} reason */
+export function deliveryLabel(reason) {
+  return DELIVERY_LABELS[reason] ?? reason;
+}

@@ -17,6 +17,11 @@ import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
 import { SurenseClient } from '../surense.js';
 import { extractPairs, optionsFromSchema, scoreCatalog } from '../sources.js';
+import { describeLeads, labelMap } from '../dashboard/view.js';
+import { DEFAULT_COLUMNS, TECHNICAL } from '../dashboard/labels.js';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Compares two secrets without leaking their contents through timing.
@@ -114,6 +119,10 @@ function presentChange(row) {
  * @param {typeof fetch} [deps.fetchImpl]  Injectable, for tests.
  * @returns {import('node:http').Server}
  */
+const DASHBOARD_HTML = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'dashboard.html'),
+  'utf8');
+
 export function createApi({ db, config, fetchImpl }) {
   const routes = [];
   const route = (method, pattern, handler, { auth = true } = {}) =>
@@ -565,6 +574,95 @@ export function createApi({ db, config, fetchImpl }) {
     };
   });
 
+  // ------------------------------------------------------------- dashboard
+  // The page itself carries no data — it is an empty shell that asks for the
+  // token and then calls the authenticated endpoints below. That is why it
+  // can be served unauthenticated: there is nothing in it to leak, and a
+  // token in a URL would end up in browser history and proxy logs.
+  route('GET', /^\/(dashboard|dashboard\/)?$/, async () => ({
+    status: 200,
+    body: DASHBOARD_HTML,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' }
+  }), { auth: false });
+
+  // What the filters offer, and how to say each field key in Hebrew.
+  route('GET', /^\/api\/dashboard\/filters$/, async () => {
+    const [sample] = await db.listLeads({ limit: 1 });
+    const keys = sample ? Object.keys(sample.fields) : [];
+
+    // Plumbing is offered but not shown by default — a tenant id on every row
+    // is a column that costs width and tells the reader nothing.
+    const columns = keys.filter(key => !TECHNICAL.has(key));
+
+    return {
+      columns: [...columns, ...keys.filter(key => TECHNICAL.has(key))],
+      defaultColumns: DEFAULT_COLUMNS.filter(key => keys.includes(key)),
+      labels: labelMap(keys),
+      statuses: await db.distinctFieldValues(config.messaging.columns.status, 60),
+      assignees: await db.distinctFieldValues('assigneeName', 40)
+    };
+  });
+
+  // One page of leads, translated, with whether each has been notified.
+  route('GET', /^\/api\/dashboard\/leads$/, async (_request, _params, url) => {
+    const columns = config.messaging.columns;
+
+    const limit = Number(url.searchParams.get('limit') ?? 50);
+    const offset = Number(url.searchParams.get('offset') ?? 0);
+
+    const { rows, total } = await db.listLeadsForDashboard({
+      columns,
+      limit: Number.isFinite(limit) ? limit : 50,
+      offset: Number.isFinite(offset) ? offset : 0,
+      search: url.searchParams.get('search') ?? '',
+      status: url.searchParams.get('status') ?? '',
+      assignee: url.searchParams.get('assignee') ?? '',
+      delivery: url.searchParams.get('delivery') ?? 'all'
+    });
+
+    const ids = rows.map(row => row.id);
+
+    const [pending, lastSend, templates, recipientRows, sourceNames, counts, unresolved] =
+      await Promise.all([
+        db.pendingChangesForLeads(ids, columns.status),
+        db.lastSendForLeads(ids, columns.status),
+        db.listTemplates(),
+        db.listRecipients(),
+        db.sourceNameMap(),
+        db.deliveryCounts(columns.status),
+        db.listUnresolvedSources(columns)
+      ]);
+
+    const leads = describeLeads({
+      leads: rows,
+      pending,
+      lastSend,
+      templates: new Map(templates.map(row => [normalizeText(row.status), row])),
+      recipients: new Map(recipientRows.map(row => [row.source_key, row])),
+      sourceNames,
+      columns,
+      messaging: config.messaging
+    });
+
+    return {
+      total,
+      limit,
+      offset,
+      leads,
+      summary: {
+        leads: counts.leads,
+        openLeads: counts.open_leads,
+        openChanges: counts.open_changes,
+        sentLeads: counts.sent_leads,
+        sentChanges: counts.sent_changes,
+        recipients: recipientRows.length,
+        unresolvedSources: unresolved.length,
+        unresolvedLeads: unresolved.reduce((sum, row) => sum + row.leads, 0),
+        redirectAllTo: config.messaging.redirectAllTo || null
+      }
+    };
+  });
+
   // --------------------------------------------------------------- columns
   // Which of the CRM's fields the messaging layer is pointed at, and whether
   // those names actually exist. With a hundred-odd fields, finding the right
@@ -901,7 +999,7 @@ export function createApi({ db, config, fetchImpl }) {
       const result = await match.handler(request, params, url);
 
       if (result && typeof result === 'object' && 'status' in result && 'body' in result) {
-        return send(response, result.status, result.body);
+        return send(response, result.status, result.body, result.headers ?? {});
       }
 
       return send(response, 200, result ?? { ok: true });

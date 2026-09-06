@@ -589,6 +589,192 @@ export class Database {
     return { written };
   }
 
+  /**
+   * A page of leads for the dashboard, with whether each has been notified.
+   *
+   * "Handled" is asked of the change feed, not of the lead: a lead is not a
+   * thing that gets sent, a status change is. A lead counts as open when any
+   * of its status changes is still unsent, which is what a reader means by
+   * "did this one go out yet".
+   *
+   * The delivery filter is applied in SQL so paging stays honest — filtering
+   * a page after it was fetched gives short pages and a wrong total.
+   *
+   * @param {object} options
+   * @param {{status: string, sourceId: string, source: string}} options.columns
+   * @param {number} [options.limit]
+   * @param {number} [options.offset]
+   * @param {string} [options.search]    Matched against name, number, phone.
+   * @param {string} [options.status]    Exact CRM status name.
+   * @param {string} [options.assignee]  Exact handler name.
+   * @param {'all'|'sent'|'open'|'none'} [options.delivery]
+   * @returns {Promise<{rows: Array<object>, total: number}>}
+   */
+  async listLeadsForDashboard({
+    columns, limit = 50, offset = 0, search = '',
+    status = '', assignee = '', delivery = 'all'
+  } = {}) {
+    const params = [columns.status];
+    const where = [];
+
+    // Does this lead have a status change, sent or unsent? Expressed once and
+    // reused, so the filter and the returned flags can never disagree.
+    const openExists = `EXISTS (SELECT 1 FROM changes c
+                                 WHERE c.lead_id = l.id
+                                   AND c.column_name = $1
+                                   AND c.notified_at IS NULL)`;
+    const sentExists = `EXISTS (SELECT 1 FROM changes c
+                                 WHERE c.lead_id = l.id
+                                   AND c.column_name = $1
+                                   AND c.notified_at IS NOT NULL)`;
+
+    if (search) {
+      params.push(`%${search}%`);
+      const like = `$${params.length}`;
+
+      where.push(`(l.fields ->> 'fullName' ILIKE ${like}
+                OR l.fields ->> 'number'   ILIKE ${like}
+                OR l.fields ->> 'cellNumber' ILIKE ${like}
+                OR l.fields ->> 'idNumber' ILIKE ${like}
+                OR l.id ILIKE ${like})`);
+    }
+
+    if (status) {
+      params.push(status);
+      where.push(`l.fields ->> $1 = $${params.length}`);
+    }
+
+    if (assignee) {
+      params.push(assignee);
+      where.push(`l.fields ->> 'assigneeName' = $${params.length}`);
+    }
+
+    if (delivery === 'sent') where.push(`${sentExists} AND NOT ${openExists}`);
+    if (delivery === 'open') where.push(openExists);
+    if (delivery === 'none') where.push(`NOT ${openExists} AND NOT ${sentExists}`);
+
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // Counted through a subquery that carries the same two flags as the page
+    // below. Without them the count would reference no parameter at all when
+    // nothing is filtered, and Postgres rejects a bind that supplies one.
+    const { rows: [{ total }] } = await this.pool.query(
+      `SELECT count(*)::int AS total
+         FROM (SELECT ${openExists} AS has_open, ${sentExists} AS has_sent
+                 FROM leads l ${clause}) counted`,
+      params);
+
+    params.push(Math.min(Math.max(limit, 1), 500));
+    params.push(Math.max(offset, 0));
+
+    const { rows } = await this.pool.query(
+      `SELECT l.id, l.fields, l.changed_at, l.change_type,
+              ${openExists} AS has_open,
+              ${sentExists} AS has_sent
+         FROM leads l
+         ${clause}
+        ORDER BY l.changed_at DESC, l.id
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params);
+
+    return { rows, total };
+  }
+
+  /**
+   * The unsent status changes for a given set of leads.
+   *
+   * Fetched for the page being shown rather than for the whole table: the
+   * reason a change is not going out is worked out by the outbox itself, and
+   * that needs the change row, not a summary of it.
+   *
+   * @param {Array<string>} leadIds
+   * @param {string} statusColumn
+   * @returns {Promise<Array<object>>}
+   */
+  async pendingChangesForLeads(leadIds, statusColumn) {
+    if (!leadIds.length) return [];
+
+    const { rows } = await this.pool.query(
+      `SELECT c.id, c.lead_id, c.change_type, c.column_name,
+              c.before_value, c.after_value, c.occurred_at,
+              c.notified_at, c.notified_via, l.fields
+         FROM changes c
+         JOIN leads l ON l.id = c.lead_id
+        WHERE c.lead_id = ANY($1)
+          AND c.column_name = $2
+          AND c.notified_at IS NULL
+        ORDER BY c.id`,
+      [leadIds, statusColumn]);
+
+    return rows;
+  }
+
+  /**
+   * The most recent send recorded for each of these leads.
+   *
+   * @param {Array<string>} leadIds
+   * @param {string} statusColumn
+   * @returns {Promise<Map<string, {notified_at: Date, notified_via: string, after_value: string}>>}
+   */
+  async lastSendForLeads(leadIds, statusColumn) {
+    if (!leadIds.length) return new Map();
+
+    const { rows } = await this.pool.query(
+      `SELECT DISTINCT ON (lead_id)
+              lead_id, notified_at, notified_via, after_value
+         FROM changes
+        WHERE lead_id = ANY($1)
+          AND column_name = $2
+          AND notified_at IS NOT NULL
+        ORDER BY lead_id, notified_at DESC, id DESC`,
+      [leadIds, statusColumn]);
+
+    return new Map(rows.map(row => [row.lead_id, row]));
+  }
+
+  /**
+   * Distinct values of one stored field, for the dashboard's filters.
+   *
+   * @param {string} field
+   * @param {number} [limit]
+   * @returns {Promise<Array<{value: string, leads: number}>>}
+   */
+  async distinctFieldValues(field, limit = 100) {
+    const { rows } = await this.pool.query(
+      `SELECT fields ->> $1 AS value, count(*)::int AS leads
+         FROM leads
+        WHERE coalesce(fields ->> $1, '') <> ''
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT $2`,
+      [field, limit]);
+
+    return rows;
+  }
+
+  /**
+   * Headline counts for the dashboard, in one round trip.
+   *
+   * @param {string} statusColumn
+   * @returns {Promise<object>}
+   */
+  async deliveryCounts(statusColumn) {
+    const { rows: [counts] } = await this.pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM leads) AS leads,
+         (SELECT count(*)::int FROM changes
+           WHERE column_name = $1 AND notified_at IS NULL) AS open_changes,
+         (SELECT count(*)::int FROM changes
+           WHERE column_name = $1 AND notified_at IS NOT NULL) AS sent_changes,
+         (SELECT count(DISTINCT lead_id)::int FROM changes
+           WHERE column_name = $1 AND notified_at IS NULL) AS open_leads,
+         (SELECT count(DISTINCT lead_id)::int FROM changes
+           WHERE column_name = $1 AND notified_at IS NOT NULL) AS sent_leads`,
+      [statusColumn]);
+
+    return counts;
+  }
+
   /** @param {string} sourceId */
   async deleteSource(sourceId) {
     const { rowCount } = await this.pool.query(
