@@ -663,6 +663,59 @@ export function createApi({ db, config, fetchImpl }) {
     };
   });
 
+  // ----------------------------------------------------------- source names
+  // The earlier spelling of the same mapping, from when this was solved on a
+  // separate branch. Kept working, and pointed at the same table, so a script
+  // or a bookmark written against it does not quietly stop mapping anything.
+  route('GET', /^\/api\/source-names$/, async () => {
+    const map = await db.listSourceMap();
+    const sources = await db.listSourcesInUse(config.messaging.columns);
+
+    return {
+      total: map.length,
+
+      // The worklist: ids the leads actually use that are still unnamed,
+      // busiest first. Naming these in order is the shortest route to a
+      // working send path.
+      unresolvedInUse: sources
+        .filter(source => !source.resolved)
+        .slice(0, 50)
+        .map(source => ({ sourceId: source.source_id, leads: source.leads })),
+
+      sourceNames: map.map(row => ({
+        source_id: row.source_id,
+        source_name: row.name,
+        origin: row.origin,
+        updated_at: row.updated_at
+      }))
+    };
+  });
+
+  route('PUT', /^\/api\/source-names$/, async request => {
+    const body = await readJsonBody(request);
+    const list = Array.isArray(body) ? body : [body];
+
+    const invalid = list.find(item => !item?.sourceId || !item?.sourceName);
+    if (invalid) {
+      return { status: 400,
+        body: { error: 'Each entry needs {sourceId, sourceName}.' } };
+    }
+
+    // Written by hand through the API, so it outranks a name a sync finds.
+    const { written } = await db.upsertSources(
+      list.map(item => ({ id: item.sourceId, name: item.sourceName })), 'manual');
+
+    return { saved: written, sourceNames: await db.listSourceMap() };
+  });
+
+  route('DELETE', /^\/api\/source-names\/(.+)$/, async (_request, params) => {
+    const removed = await db.deleteSource(decodeURIComponent(params[0]));
+
+    return removed
+      ? { deleted: true }
+      : { status: 404, body: { error: 'No such source id.' } };
+  });
+
   // --------------------------------------------------------------- columns
   // Which of the CRM's fields the messaging layer is pointed at, and whether
   // those names actually exist. With a hundred-odd fields, finding the right
@@ -770,6 +823,11 @@ export function createApi({ db, config, fetchImpl }) {
         sourceMappingsManual: sourceMap.filter(row => row.origin === 'manual').length,
         unresolvedSourceIds: unresolved.length,
         unresolvedLeads: unresolved.reduce((sum, row) => sum + row.leads, 0),
+
+        // The names the previous version of this report used. Kept so a
+        // saved comparison against an earlier diagnostics dump still lines up.
+        sourcesStillUnnamedIds: unresolved.length,
+        sourceNamesMapped: sourceMap.length,
         templates: templates.length,
         activeTemplates: templates.filter(template => template.active).length,
         recipients: recipients.length,
@@ -812,7 +870,10 @@ export function createApi({ db, config, fetchImpl }) {
       topSourcesWithoutRecipient: sources
         .filter(source => !source.has_recipient)
         .slice(0, 15)
-        .map(source => ({ source: source.source_name, leads: source.leads })),
+        .map(source => ({
+          source: source.resolved ? source.source_name : `<unnamed id> ${source.source_id}`,
+          leads: source.leads
+        })),
 
       statusTemplates: templates.map(template => template.status)
     };

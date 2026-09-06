@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS recipients (
 -- every other entity in the CRM, the source arrives without its label. The
 -- recipients table is keyed by the name, because the name is what the
 -- operator's own file lists, so this table is the bridge between them.
--- Without it every lead skips with "lead-has-no-source".
+-- Without it every lead skips with "source-id-not-mapped".
 --
 -- `origin` records where a name came from, because the two sources of truth
 -- are not equal: a name discovered in the CRM is authoritative and may be
@@ -162,3 +162,18 @@ CREATE TABLE IF NOT EXISTS sources (
 
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Superseded by `sources` above, and kept only so that a mapping written by
+-- the earlier version of this service is not stranded. The copy below folds
+-- whatever it holds into `sources`; nothing writes to it any more.
+CREATE TABLE IF NOT EXISTS source_names (
+    source_id   TEXT PRIMARY KEY,
+    source_name TEXT        NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One-time fold-in, idempotent. A row already in `sources` wins: it may have
+-- been corrected by hand since, and a migration must not undo that.
+INSERT INTO sources (source_id, name, origin)
+SELECT source_id, source_name, 'crm' FROM source_names
+    ON CONFLICT (source_id) DO NOTHING;

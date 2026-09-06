@@ -22,6 +22,10 @@ export const SKIP = {
   // collapsing them hides which one is actually happening.
   unknownSource: 'source-id-not-mapped',
 
+  // The name this was called while the two implementations of the mapping
+  // lived on separate branches. Same string; kept so existing callers and
+  // stored reports do not silently stop matching.
+  unmappedSource: 'source-id-not-mapped',
   noRecipient: 'source-not-in-recipients',
   recipientOff: 'recipient-inactive',
   noAddress: 'recipient-has-no-address'

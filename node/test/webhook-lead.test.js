@@ -89,7 +89,7 @@ before(async () => {
 after(async () => { server?.close(); await db?.close(); });
 
 beforeEach(async () => {
-  await db.pool.query('TRUNCATE leads, changes, webhook_events, templates, recipients');
+  await db.pool.query('TRUNCATE leads, changes, webhook_events, templates, recipients, source_names, sources');
 });
 
 const send = (payload, id) => {

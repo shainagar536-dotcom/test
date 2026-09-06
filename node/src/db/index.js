@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import pg from 'pg';
 
+import { normalizeText } from '../mirror.js';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 // Postgres returns BIGSERIAL as a string to avoid precision loss. These ids
@@ -445,69 +447,54 @@ export class Database {
     return rowCount > 0;
   }
 
+  // --------------------------------------------------------- source names
   /**
-   * Every distinct source NAME the stored leads resolve to, with how many
-   * leads each covers and whether it already has a recipient row.
+  // --------------------------------------------------------- source names
+  /**
+   * Every distinct source the stored leads carry, with how many leads each
+   * covers, the name it resolves to, and whether it has a recipient row.
    *
    * This is what turns filling in the recipients table from guesswork into a
    * worklist: the busiest unmatched sources are the ones worth an address.
    *
-   * A lead reaches a name one of two ways — a name column, if the CRM serves
-   * one, or its `sourceId` through the sources table. This CRM only does the
-   * second, so a lead whose id has no row in `sources` contributes to no name
-   * at all and is reported by listUnresolvedSources instead of silently
-   * vanishing from the worklist.
+   * A lead's source arrives as an id, so each value is put through the
+   * mapping first. Matching to a recipient is then done on the NORMALIZED
+   * name here rather than in SQL, because that is exactly how the send path
+   * matches — a join on the raw string reports a source as covered that a
+   * doubled space stops the sender from ever finding.
    *
-   * @param {{source: string, sourceId: string}} columns
+   * @param {{source: string, sourceId: string}|string} columns
    * @returns {Promise<Array<object>>}
    */
   async listSourcesInUse(columns) {
     const { source, sourceId } = sourceColumns(columns);
 
+    // Either column may carry the id; whichever holds a value is the source.
     const { rows } = await this.pool.query(
-      `SELECT coalesce(NULLIF(l.fields ->> $1, ''), s.name) AS source_name,
-              count(*)::int                                 AS leads,
-              bool_or(r.source_key IS NOT NULL)             AS has_recipient
+      `SELECT coalesce(NULLIF(l.fields ->> $1, ''), l.fields ->> $2) AS value,
+              count(*)::int AS leads
          FROM leads l
-         LEFT JOIN sources s
-           ON s.source_id = NULLIF(l.fields ->> $2, '')
-         LEFT JOIN recipients r
-           ON r.source_name = coalesce(NULLIF(l.fields ->> $1, ''), s.name)
-        WHERE coalesce(NULLIF(l.fields ->> $1, ''), s.name) IS NOT NULL
+        WHERE coalesce(NULLIF(l.fields ->> $1, ''), l.fields ->> $2, '') <> ''
         GROUP BY 1
         ORDER BY 2 DESC`,
       [source, sourceId]);
 
-    return rows;
-  }
+    const names = await this.sourceNameMap();
+    const recipientKeys = new Set(
+      (await this.listRecipients()).map(recipient => recipient.source_key));
 
-  /**
-   * Source ids the leads carry that no name is known for.
-   *
-   * These are the leads that can never produce a message: the id is present,
-   * so the lead is not sourceless, but nothing can be looked up by it. Kept
-   * separate from listSourcesInUse so that "we do not know who this is" never
-   * reads as "this source has no leads".
-   *
-   * @param {{source: string, sourceId: string}} columns
-   * @returns {Promise<Array<{source_id: string, leads: number}>>}
-   */
-  async listUnresolvedSources(columns) {
-    const { source, sourceId } = sourceColumns(columns);
+    return rows.map(row => {
+      const mapped = names.get(row.value);
+      const name = mapped ?? row.value;
 
-    const { rows } = await this.pool.query(
-      `SELECT l.fields ->> $2 AS source_id, count(*)::int AS leads
-         FROM leads l
-         LEFT JOIN sources s
-           ON s.source_id = NULLIF(l.fields ->> $2, '')
-        WHERE coalesce(l.fields ->> $1, '') = ''
-          AND coalesce(l.fields ->> $2, '') <> ''
-          AND s.source_id IS NULL
-        GROUP BY 1
-        ORDER BY 2 DESC`,
-      [source, sourceId]);
-
-    return rows;
+      return {
+        source_id: row.value,
+        source_name: name,
+        resolved: mapped !== undefined,
+        leads: row.leads,
+        has_recipient: recipientKeys.has(normalizeText(name))
+      };
+    });
   }
 
   /**
@@ -516,21 +503,12 @@ export class Database {
    * This is the denominator a candidate catalog is scored against — see
    * scoreCatalog in sources.js.
    *
-   * @param {{sourceId: string}} columns
+   * @param {{source: string, sourceId: string}|string} columns
    * @returns {Promise<Map<string, number>>}
    */
   async sourceUsage(columns) {
-    const { sourceId } = sourceColumns(columns);
-
-    const { rows } = await this.pool.query(
-      `SELECT l.fields ->> $1 AS source_id, count(*)::int AS leads
-         FROM leads l
-        WHERE coalesce(l.fields ->> $1, '') <> ''
-        GROUP BY 1
-        ORDER BY 2 DESC`,
-      [sourceId]);
-
-    return new Map(rows.map(row => [row.source_id, row.leads]));
+    return new Map((await this.listSourcesInUse(columns))
+      .map(source => [source.source_id, source.leads]));
   }
 
   /**
@@ -551,6 +529,23 @@ export class Database {
          FROM sources ORDER BY name`);
 
     return rows;
+  }
+
+  /**
+   * Source ids the leads carry that no name is known for.
+   *
+   * These are the leads that can never produce a message: the id is present,
+   * so the lead is not sourceless, but nothing can be looked up by it. Kept
+   * separate from listSourcesInUse so that "we do not know who this is" never
+   * reads as "this source has no leads".
+   *
+   * @param {{source: string, sourceId: string}|string} columns
+   * @returns {Promise<Array<{source_id: string, leads: number}>>}
+   */
+  async listUnresolvedSources(columns) {
+    return (await this.listSourcesInUse(columns))
+      .filter(source => !source.resolved)
+      .map(source => ({ source_id: source.source_id, leads: source.leads }));
   }
 
   /**

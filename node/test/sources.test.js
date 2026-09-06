@@ -189,8 +189,14 @@ test('unresolved ids are reported apart from the named sources', async () => {
   await storeLead('l2', B);
   await db.upsertSources([{ id: A, name: 'מטאור' }], 'crm');
 
-  const named = await db.listSourcesInUse(COLUMNS);
-  assert.deepEqual(named.map(row => row.source_name), ['מטאור']);
+  // Every source in use is listed, named or not, so an unnamed one cannot
+  // drop off the worklist. `resolved` is what separates them.
+  const inUse = await db.listSourcesInUse(COLUMNS);
+
+  assert.deepEqual(
+    inUse.filter(row => row.resolved).map(row => row.source_name), ['מטאור']);
+  assert.deepEqual(
+    inUse.filter(row => !row.resolved).map(row => row.source_id), [B]);
 
   const unresolved = await db.listUnresolvedSources(COLUMNS);
   assert.deepEqual(unresolved, [{ source_id: B, leads: 1 }]);
@@ -320,7 +326,9 @@ test('/api/sources reports the unresolved ids alongside the worklist', async () 
 
   const body = await (await call('/api/sources')).json();
 
-  assert.equal(body.total, 1);
+  // Both sources are listed; one of them is still just an id.
+  assert.equal(body.total, 2);
+  assert.equal(body.withRecipient, 0);
   assert.equal(body.unresolvedIds, 1);
   assert.equal(body.unresolvedLeads, 1);
   assert.equal(body.unresolved[0].source_id, B);
@@ -339,4 +347,32 @@ test('an option list under an unexpected key is still found', () => {
   const schema = [{ key: 'sourceId', enumValues: [{ id: A, name: 'מטאור' }] }];
 
   assert.deepEqual(optionsFromSchema(schema, 'sourceId'), [{ id: A, name: 'מטאור' }]);
+});
+
+test('a source column pointed at the id column still resolves', async () => {
+  // An earlier version of this service set SOURCE_COLUMN=sourceId, and that
+  // setting outlives a deploy. Taking the value at face value would treat a
+  // UUID as the partner's name: it matches no recipient, and the report
+  // blames the recipients file instead of the missing mapping.
+  const columns = { ...COLUMNS, source: 'sourceId', sourceId: 'sourceId' };
+
+  const resolved = resolveSourceName(
+    { sourceId: A }, columns, new Map([[A, 'מטאור']]));
+
+  assert.equal(resolved.via, 'map');
+  assert.equal(resolved.name, 'מטאור');
+
+  const unmapped = resolveSourceName({ sourceId: A }, columns, new Map());
+  assert.equal(unmapped.name, '');
+  assert.equal(unmapped.id, A);
+});
+
+test('a real name in the source column is never mistaken for an id', async () => {
+  const columns = { source: 'מקור מפנה', sourceId: 'sourceId' };
+
+  const resolved = resolveSourceName(
+    { 'מקור מפנה': 'מטאור - אריאל', sourceId: A }, columns, new Map());
+
+  assert.equal(resolved.via, 'column');
+  assert.equal(resolved.name, 'מטאור - אריאל');
 });

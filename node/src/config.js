@@ -171,39 +171,41 @@ export function loadConfig() {
       shrinkGuard: number('SHRINK_GUARD', 0.5)
     },
 
+    // Read-only lookups tried when hunting for the source catalog. Order is
+    // most to least likely; each is scored against real lead traffic rather
+    // than trusted for answering at all.
+    sourceCatalogPaths: optional('SOURCE_CATALOG_PATHS', [
+      '/leads/sources',
+      '/sources',
+      '/leadsources',
+      '/lookups/sources',
+      '/settings/sources',
+      '/leads/sources/list'
+    ].join(',')).split(',').map(path => path.trim()).filter(Boolean),
+
     messaging: {
-      // Which mirrored columns carry the meaning the outbox needs. These are
-      // the CRM's own field labels, so /api/leads shows the exact spellings.
+      // Which mirrored columns carry the meaning the outbox needs. A column
+      // is named by the CRM's own field key, which is what /api/columns
+      // lists. The defaults are Surense's keys; another CRM needs all of them
+      // set.
       columns: {
         status: optional('STATUS_COLUMN', 'statusName'),
 
-        // A source NAME column, if the CRM ever serves one. It does not
-        // today: every other entity arrives as an id/name pair, and the
-        // source is the one that arrives as a bare id. Left configurable so
-        // that a CRM which does serve one needs no code change, and empty by
-        // default so the id lookup below is what actually runs.
+        // A source NAME column, if the CRM serves one. Surense does not: of
+        // its 78 fields the only one naming the referring source is
+        // `sourceId`, a UUID. Pointing this at an id column is therefore
+        // safe and is what an earlier version of this service did — a value
+        // shaped like a UUID is recognised as an id and resolved through the
+        // `sources` table, never taken for a name.
         source: optional('SOURCE_COLUMN', ''),
 
-        // The id the leads really carry, resolved to a name through the
-        // `sources` table. This is the mapping the recipients file is joined
-        // on — see sources.js.
+        // The id column, resolved to a name through the `sources` table.
+        // This is what the recipients file is ultimately joined on.
         sourceId: optional('SOURCE_ID_COLUMN', 'sourceId'),
 
         clientName: optional('CLIENT_NAME_COLUMN', 'fullName'),
         leadNumber: optional('LEAD_NUMBER_COLUMN', 'number')
       },
-
-      // Read-only lookups tried when hunting for the source catalog. Order is
-      // most to least likely; each is scored against real lead traffic rather
-      // than trusted for answering at all.
-      sourceCatalogPaths: optional('SOURCE_CATALOG_PATHS', [
-        '/leads/sources',
-        '/sources',
-        '/leadsources',
-        '/lookups/sources',
-        '/settings/sources',
-        '/leads/sources/list'
-      ].join(',')).split(',').map(path => path.trim()).filter(Boolean),
 
       subject: multiline('MESSAGE_SUBJECT', 'עדכון סטטוס ליד — {client}'),
 

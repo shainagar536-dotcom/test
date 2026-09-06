@@ -203,10 +203,20 @@ export function scoreCatalog(pairs, usage) {
  * @returns {{name: string, id: string, via: 'column'|'map'|'none'}}
  */
 export function resolveSourceName(fields, columns, sourceNames) {
-  const direct = fields?.[columns.source];
-  if (direct) return { name: String(direct), id: '', via: 'column' };
+  const direct = String(fields?.[columns.source] ?? '').trim();
 
-  const id = String(fields?.[columns.sourceId] ?? '').trim();
+  // A configured source column that turns out to hold a UUID is an id column,
+  // whatever it was meant to be. This matters in practice: SOURCE_COLUMN has
+  // been pointed at `sourceId` in a deployed environment, and taking that
+  // value at face value would treat a UUID as a partner's name — matching no
+  // recipient, and reporting the wrong reason for it.
+  if (direct && !isUuid(direct)) {
+    return { name: direct, id: '', via: 'column' };
+  }
+
+  // Whichever column actually carries the id: the one configured for it, or
+  // the source column when that is what it holds.
+  const id = direct || String(fields?.[columns.sourceId] ?? '').trim();
   if (!id) return { name: '', id: '', via: 'none' };
 
   const mapped = sourceNames?.get(id);

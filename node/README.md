@@ -138,6 +138,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `GET` | `/api/sources` | כל המקורות בשימוש, מהעמוס לדל, עם דגל כיסוי, ומזהים שלא זוהו |
 | `GET`/`PUT` | `/api/sources/map` | **מזהה ← שם.** הגשר שבלעדיו כלום לא נשלח |
 | `DELETE` | `/api/sources/map/:id` | מחיקת מיפוי |
+| `GET`/`PUT` | `/api/source-names` | אותו מיפוי, בשם שהיה לו קודם. עדיין עובד |
+| `DELETE` | `/api/source-names/:id` | מחיקת מיפוי (שם ישן) |
 | `POST` | `/api/sources/probe` | מחפש ב-CRM קטלוג מקורות ומדרג כל מועמד מול הלידים. `?apply=true` כדי לשמור |
 | `GET` | `/api/columns` | האם ארבעת שמות העמודות נכונים, ומה להשתמש במקומם |
 | `GET` | `/api/diagnostics` | כל מצב המערכת בתשובה אחת, בלי פרטי לקוחות |
@@ -284,6 +286,26 @@ curl -H "Authorization: Bearer $TOKEN" $URL/api/sources
 ```
 
 מחזיר כל מקור שהלידים באמת משתמשים בו, **מהעמוס לדל**, עם דגל אם כבר יש לו כתובת. זה הופך את מילוי הטבלה מניחוש לרשימת עבודה.
+
+### המזהה מול השם — למה צריך `source_names`
+
+לליד ב-Surense **אין שם מקור**. מתוך 79 השדות שהוא מחזיר, מה שיש הוא `sourceId` — UUID. קובץ הנמענים לעומת זאת בנוי לפי **שמות** של שותפים. בלי גשר בין השניים אף הודעה לא תישלח אף פעם: המקור של כל ליד הוא UUID שלא תואם לשום שורה ב-`recipients`.
+
+`source_names` הוא הגשר. אתה ממלא אותו מבחוץ — למשל בפנייה ל-CRM לכל `sourceId` — והתוצאה נשמרת, כך שהפנייה עולה **קריאה אחת למקור** ולא קריאה לכל ליד. בפועל: ~160 מזהים מול 3,279 לידים.
+
+```bash
+# מה עוד חסר, מהעמוס לדל
+curl -H "Authorization: Bearer $TOKEN" $URL/api/source-names
+
+# מילוי
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '[{"sourceId":"2f3a9c1e-...","sourceName":"מטאור - אריאל יואב דביר"}]' \
+  $URL/api/source-names
+```
+
+מזהה שאין לו שם **לא נשלח** ומדווח כ-`source-id-not-mapped` — סיבה נפרדת מ-`source-not-in-recipients`. לשתיהן תיקון אחר: אחת דורשת שורה ב-`source_names`, השנייה שורה בקובץ הנמענים, וערבוב ביניהן שולח את מי שממלא אותן לטבלה הלא נכונה.
+
+אם ב-CRM אחר העמודה כבר מכילה שם ולא מזהה — לא צריך למלא כלום. המיפוי נכנס לפעולה רק כשהערך נראה כמו UUID.
 
 ### ה-outbox — מה שהקוד המתוזמן קורא
 
