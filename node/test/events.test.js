@@ -1286,3 +1286,139 @@ test('a source with no address is skipped, never guessed onto a channel', async 
   assert.equal(outbox.readyToSend, 0);
   assert.equal(Object.keys(outbox.skipped)[0], 'recipient-has-no-address');
 });
+
+// ----------------------------------------- waiting to be sent vs stuck
+
+test('"waiting to be sent" means only what the sender would actually send', async () => {
+  // Three unsent events: one sendable, one with no wording, one whose source
+  // has no address. All three are "not handled yet", and reporting them as
+  // one number is what makes a queue of 139 read as 139 about to go out.
+  const ready = await db.recordStatusEvent({
+    leadId: 'r1', customerName: 'יישלח', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-03T10:00:00Z'
+  });
+
+  const noWording = await db.recordStatusEvent({
+    leadId: 'b1', customerName: 'אין נוסח', statusBefore: 'חדש',
+    statusAfter: 'סטטוס בלי נוסח', sourceName: SOURCE_TITLE,
+    sourceState: 'resolved', occurredAt: '2026-09-02T10:00:00Z'
+  });
+
+  const noAddress = await db.recordStatusEvent({
+    leadId: 'b2', customerName: 'אין כתובת', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: 'קמפיין', sourceState: 'resolved',
+    occurredAt: '2026-09-01T10:00:00Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+  await db.saveRecipient({ sourceKey: 'קמפיין', sourceName: 'קמפיין', active: true });
+
+  const all = await (await call('/api/dashboard/events')).json();
+
+  assert.equal(all.counts.open, 3);
+  assert.equal(all.counts.ready, 1);
+  assert.equal(all.counts.blocked, 2);
+
+  const readyOnly = await (await call('/api/dashboard/events?delivery=ready')).json();
+  assert.equal(readyOnly.total, 1);
+  assert.deepEqual(readyOnly.events.map(e => e.id), [ready.id]);
+
+  const blockedOnly = await (await call('/api/dashboard/events?delivery=blocked')).json();
+  assert.equal(blockedOnly.total, 2);
+  assert.deepEqual(blockedOnly.events.map(e => e.id).sort(),
+    [noWording.id, noAddress.id].sort());
+});
+
+test('the ready filter agrees with the outbox exactly', async () => {
+  for (const [lead, status, source] of [
+    ['a', 'לא ענה', SOURCE_TITLE],
+    ['b', 'לא ענה', 'קמפיין'],
+    ['c', 'סטטוס בלי נוסח', SOURCE_TITLE]
+  ]) {
+    await db.recordStatusEvent({
+      leadId: lead, customerName: lead, statusBefore: 'חדש', statusAfter: status,
+      sourceName: source, sourceState: 'resolved',
+      occurredAt: `2026-09-0${lead === 'a' ? 1 : lead === 'b' ? 2 : 3}T10:00:00Z`
+    });
+  }
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+  await db.saveRecipient({ sourceKey: 'קמפיין', sourceName: 'קמפיין', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+  const screen = await (await call('/api/dashboard/events?delivery=ready')).json();
+
+  // The screen and the sender must never disagree about this.
+  assert.equal(screen.total, outbox.readyToSend);
+  assert.deepEqual(
+    screen.events.map(e => e.id).sort(),
+    outbox.messages.map(m => m.eventId).sort());
+});
+
+test('no ready rows returns nothing, not everything', async () => {
+  // An empty id set must mean "none match", not "no filter applied".
+  await db.recordStatusEvent({
+    leadId: 'x', customerName: 'חסום', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-01T10:00:00Z'
+  });
+
+  const readyOnly = await (await call('/api/dashboard/events?delivery=ready')).json();
+
+  assert.equal(readyOnly.total, 0);
+  assert.deepEqual(readyOnly.events, []);
+});
+
+test('a blocked row becomes ready once what blocked it is fixed', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: 'f1', customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-01T10:00:00Z'
+  });
+
+  // No wording yet.
+  let body = await (await call('/api/dashboard/events?delivery=blocked')).json();
+  assert.deepEqual(body.events.map(e => e.id), [id]);
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  body = await (await call('/api/dashboard/events?delivery=ready')).json();
+  assert.deepEqual(body.events.map(e => e.id), [id]);
+
+  body = await (await call('/api/dashboard/events?delivery=blocked')).json();
+  assert.deepEqual(body.events, []);
+});
+
+test('the ready filter pages on its own total', async () => {
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  for (let i = 0; i < 5; i++) {
+    await db.recordStatusEvent({
+      leadId: `p${i}`, customerName: `לקוח ${i}`, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+      occurredAt: new Date(Date.UTC(2026, 8, 1 + i)).toISOString()
+    });
+  }
+
+  // And two that are stuck, which must not inflate the ready total.
+  for (let i = 0; i < 2; i++) {
+    await db.recordStatusEvent({
+      leadId: `q${i}`, customerName: `חסום ${i}`, statusBefore: 'חדש',
+      statusAfter: 'סטטוס בלי נוסח', occurredAt: `2026-08-0${i + 1}T10:00:00Z`
+    });
+  }
+
+  const page = await (await call('/api/dashboard/events?delivery=ready&limit=2')).json();
+
+  assert.equal(page.total, 5);
+  assert.equal(page.events.length, 2);
+  assert.equal(page.counts.blocked, 2);
+});

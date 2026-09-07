@@ -1024,12 +1024,22 @@ export class Database {
    */
   async listStatusEvents({
     limit = 100, offset = 0, pendingOnly = false, sinceId, search = '',
-    status = '', assignee = '', delivery = 'all', channel = '', sort = 'desc'
+    status = '', assignee = '', delivery = 'all', channel = '', sort = 'desc',
+    ids
   } = {}) {
     const params = [];
     const where = [];
 
     if (pendingOnly) where.push('notified_at IS NULL');
+
+    // Whether a pending event will actually be sent is the outbox's decision,
+    // not something SQL can restate without the two drifting apart. So the
+    // caller works it out with buildEventOutbox and hands the ids down here —
+    // one source of truth, and paging still done by the database.
+    if (ids) {
+      params.push(ids);
+      where.push(`id = ANY($${params.length})`);
+    }
 
     if (sinceId !== undefined) {
       params.push(sinceId);
@@ -1092,12 +1102,17 @@ export class Database {
    */
   async countStatusEvents({
     pendingOnly = false, search = '', status = '', assignee = '',
-    delivery = 'all', channel = ''
+    delivery = 'all', channel = '', ids
   } = {}) {
     const params = [];
     const where = [];
 
     if (pendingOnly) where.push('notified_at IS NULL');
+
+    if (ids) {
+      params.push(ids);
+      where.push(`id = ANY($${params.length})`);
+    }
 
     if (search) {
       params.push(`%${search}%`);
@@ -1132,6 +1147,23 @@ export class Database {
       params);
 
     return total;
+  }
+
+  /**
+   * Every unsent event, for working out what would go out.
+   *
+   * Deliberately uncapped, unlike a page: the decision has to cover the whole
+   * queue or the counts it produces would be a sample presented as a total.
+   *
+   * @returns {Promise<Array<object>>}
+   */
+  async allPendingEvents() {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM status_events
+        WHERE notified_at IS NULL
+        ORDER BY occurred_at DESC, id DESC`);
+
+    return rows;
   }
 
   /** Headline counts for the dashboard. */

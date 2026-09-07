@@ -290,9 +290,11 @@
     <input type="search" id="q" placeholder="שם לקוח, מספר ליד, מקור או מטפל">
     <select id="delivery">
       <option value="all">הכול</option>
-      <option value="open">לא טופל</option>
+      <option value="ready">ממתין לשליחה</option>
+      <option value="blocked">לא יישלח — חסום</option>
+      <option value="open">לא טופל (הכול)</option>
       <option value="sent">נשלח</option>
-      <option value="manual">טופל ידנית / לא יישלח</option>
+      <option value="manual">טופל ידנית / הוחלט לא לשלוח</option>
     </select>
     <select id="channel">
       <option value="">כל הערוצים</option>
@@ -540,7 +542,10 @@ function renderCards(data) {
 
   $('cards').innerHTML =
     card(n(c.total), 'שינויי סטטוס', n(c.leads) + ' לידים') +
-    card(n(c.open), 'לא טופלו', 'ממתינים לשליחה') +
+    // "Open" on its own says nothing actionable: most of a queue can be
+    // stuck. The split is the number worth looking at.
+    card(n(c.ready), 'ממתינים לשליחה', 'הריצה הבאה תשלח אותם') +
+    card(n(c.blocked), 'חסומים', 'לא יישלחו עד שיתוקן משהו') +
     card(n(c.sent), 'נשלחו',
          'וואטסאפ ' + n(c.whatsapp) + ' · מייל ' + n(c.email)) +
     card(n(c.manual) , 'טופלו ידנית', 'האוטומציה מדלגת עליהם') +
@@ -648,9 +653,11 @@ function renderTable() {
   $('state').hidden = state.events.length > 0;
   if (!state.events.length) {
     $('state').className = 'empty';
-    $('state').textContent = state.total === 0 && !state.q
+    $('state').textContent = state.total === 0 && !state.q && state.delivery === 'all'
       ? 'עוד לא נרשם אף שינוי סטטוס. הרשומה הראשונה תופיע כאן ברגע שסטטוס ישתנה ב-CRM.'
-      : 'אין רשומות שמתאימות לסינון.';
+      : state.delivery === 'ready'
+        ? 'אין כרגע שורה שתישלח בריצה הבאה. תסתכל ב"לא יישלח — חסום" כדי לראות מה עוצר.'
+        : 'אין רשומות שמתאימות לסינון.';
   }
 }
 

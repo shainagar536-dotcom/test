@@ -1091,52 +1091,77 @@ export function createApi({ db, config, fetchImpl }) {
       channel: url.searchParams.get('channel') ?? ''
     };
 
-    // Newest first by default; the reader can flip it to walk forwards
-    // through what happened.
+    // Newest first by default; the reader can flip it to walk forwards.
     const sort = url.searchParams.get('sort') === 'asc' ? 'asc' : 'desc';
 
-    const [events, counts, templates, recipientRows] = await Promise.all([
-      db.listStatusEvents({
-        ...query,
-        sort,
-        limit: Number.isFinite(limit) ? limit : 50,
-        offset: Number.isFinite(offset) ? offset : 0
-      }),
-      db.statusEventCounts(),
-      db.listTemplates(),
-      db.listRecipients()
+    const [counts, templates, recipientRows] = await Promise.all([
+      db.statusEventCounts(), db.listTemplates(), db.listRecipients()
     ]);
 
-    // The same decision the sender makes, so the screen cannot claim a
-    // message is queued while the sender skips it.
-    const { ready, skipped } = buildEventOutbox({
-      events,
-      templates: new Map(templates.map(row => [normalizeText(row.status), row])),
-      recipients: new Map(recipientRows.map(row => [row.source_key, row])),
+    const templateMap =
+      new Map(templates.map(row => [normalizeText(row.status), row]));
+    const recipientMap = new Map(recipientRows.map(row => [row.source_key, row]));
+
+    // What would go out if the sender ran now — decided by the sender's own
+    // function, over the WHOLE queue. So "ממתין לשליחה" on this screen means
+    // exactly what it means to the thing that does the sending.
+    const decision = buildEventOutbox({
+      events: await db.allPendingEvents(),
+      templates: templateMap,
+      recipients: recipientMap,
       messaging: { ...config.messaging, maxPerRun: Number.MAX_SAFE_INTEGER }
     });
 
-    const sendable = new Set(ready.map(item => item.eventId));
-    const reasons = new Map(skipped.map(item => [item.eventId, item.reason]));
+    const readyIds = decision.ready.map(item => item.eventId);
+    const blockedIds = decision.skipped.map(item => item.eventId);
+
+    // Both are "not handled yet", and lumping them together is what made a
+    // queue of 139 read as 139 messages about to go out when none would.
+    const idFilter = query.delivery === 'ready' ? readyIds
+      : query.delivery === 'blocked' ? blockedIds
+        : undefined;
+
+    // An empty set has to mean "none match", never "no filter".
+    const scoped = idFilter
+      ? { ...query, delivery: 'open', ids: idFilter }
+      : query;
+
+    const events = await db.listStatusEvents({
+      ...scoped,
+      sort,
+      limit: Number.isFinite(limit) ? limit : 50,
+      offset: Number.isFinite(offset) ? offset : 0
+    });
+
+    const sendable = new Set(readyIds);
+    const reasons = new Map(decision.skipped.map(item => [item.eventId, item.reason]));
 
     // How each one would go out, so the column reads "וואטסאפ" before the
     // message is sent and not only after.
-    const planned = new Map(ready.map(item => [item.eventId, item.channel]));
+    const planned = new Map(decision.ready.map(item => [item.eventId, item.channel]));
 
-    const byName = new Map(recipientRows.map(row => [row.source_key, row]));
     for (const event of events) {
       if (planned.has(Number(event.id)) || !event.source_name) continue;
 
-      const recipient = byName.get(normalizeText(event.source_name));
+      const recipient = recipientMap.get(normalizeText(event.source_name));
       if (recipient?.channel) planned.set(Number(event.id), recipient.channel);
     }
 
     return {
-      total: await db.countStatusEvents(query),
+      total: await db.countStatusEvents(scoped),
       limit,
       offset,
       sort,
-      counts,
+
+      counts: {
+        ...counts,
+
+        // Of the unsent ones, how many would actually go out and how many are
+        // stuck. Without the split, "open" is a number nobody can act on.
+        ready: readyIds.length,
+        blocked: blockedIds.length
+      },
+
       recipients: recipientRows.length,
       redirectAllTo: config.messaging.redirectAllTo || null,
       events: events.map(event => describeEvent(event, sendable, reasons, planned))
