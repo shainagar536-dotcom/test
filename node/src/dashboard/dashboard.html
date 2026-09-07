@@ -86,7 +86,8 @@
 
   .card {
     background: var(--panel); border: 1px solid var(--line);
-    border-radius: 11px; padding: 13px 15px;
+    border-radius: 12px; padding: 14px 16px;
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 4%, transparent);
   }
 
   .card .n { font-size: 25px; font-weight: 680; letter-spacing: -.5px; }
@@ -102,7 +103,8 @@
 
   .tablewrap {
     background: var(--panel); border: 1px solid var(--line);
-    border-radius: 11px; overflow-x: auto;
+    border-radius: 12px; overflow-x: auto;
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 4%, transparent);
   }
 
   table { border-collapse: collapse; width: 100%; white-space: nowrap; }
@@ -121,13 +123,14 @@
   th.sortable { cursor: pointer; user-select: none; color: var(--accent); }
   th.sortable:hover { text-decoration: underline; }
 
-  tbody tr { cursor: pointer; }
-  tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  tbody tr { cursor: pointer; transition: background-color .12s; }
+  tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
   tbody tr:last-child td { border-bottom: none; }
 
   .badge {
-    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
     font-size: 12px; font-weight: 600; white-space: nowrap;
+    letter-spacing: -.1px;
   }
   .b-sent    { color: var(--sent);    background: var(--sent-bg); }
   .b-pending { color: var(--open);    background: var(--open-bg); }
@@ -137,10 +140,67 @@
   .b-manual  { color: var(--accent);  background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .b-skipped { color: var(--none);    background: var(--none-bg); }
 
-  .rowstate {
-    display: block; margin-top: 5px; font-size: 12px;
-    padding: 2px 6px; border-radius: 6px; max-width: 130px;
+  /* --- the per-row state control ------------------------------------- */
+  .statebox {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 6px; flex-wrap: wrap;
   }
+
+  .rowstate {
+    font-size: 12px; font-weight: 550;
+    padding: 4px 26px 4px 9px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+    appearance: none;
+    /* A caret drawn in the text colour, so it follows the theme. */
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                      linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: left 11px top 52%, left 6px top 52%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    transition: border-color .15s, color .15s, background-color .15s;
+  }
+
+  .rowstate:hover { border-color: var(--accent); color: var(--ink); }
+  .rowstate:focus-visible {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+
+  /* Unsaved: the row says so before you look for a button. */
+  .statebox.changed .rowstate {
+    border-color: var(--accent); color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+
+  .stateactions { display: flex; align-items: center; gap: 5px; }
+
+  .statenote {
+    font-size: 12px; padding: 4px 9px; width: 140px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+  }
+  .statenote:focus-visible {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .statenote[hidden] { display: none; }
+
+  .statesave, .statecancel {
+    font-size: 12px; font-weight: 600;
+    padding: 4px 11px; border-radius: 8px; border: 1px solid transparent;
+    transition: filter .15s, background-color .15s;
+  }
+  .statesave {
+    background: var(--accent); color: #fff;
+  }
+  .statesave:hover { filter: brightness(1.08); border-color: transparent; }
+  .statecancel {
+    background: transparent; color: var(--muted); border-color: var(--line);
+  }
+  .statecancel:hover { color: var(--ink); border-color: var(--muted); }
 
   .bulk {
     display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
@@ -152,7 +212,11 @@
 
   td.pick, th.pick { width: 34px; text-align: center; padding-inline: 6px; }
 
-  .why { color: var(--muted); font-size: 11.5px; margin-top: 2px; white-space: normal; }
+  .why { color: var(--muted); font-size: 11.5px; margin-top: 3px; white-space: normal; }
+
+  /* The handled column carries a badge, a reason and a control — it needs to
+     wrap rather than force the table wider than the screen. */
+  tbody td:last-child { white-space: normal; min-width: 250px; }
 
   .pager {
     display: flex; gap: 10px; align-items: center; justify-content: center;
@@ -287,7 +351,7 @@
   <div class="cards" id="cards"></div>
 
   <div class="filters">
-    <input type="search" id="q" placeholder="שם לקוח, מספר ליד, מקור או מטפל">
+    <input type="search" id="q" placeholder="מס׳ אירוע, שם לקוח, מספר ליד, מקור או מטפל">
     <select id="delivery">
       <option value="all">הכול</option>
       <option value="ready">ממתין לשליחה</option>
@@ -589,22 +653,45 @@ function renderTable() {
     };
   }
 
-  for (const select of $('rows').querySelectorAll('[data-state]')) {
-    select.onchange = async () => {
-      const id = Number(select.dataset.state);
+  for (const box of $('rows').querySelectorAll('.statebox')) {
+    const select = box.querySelector('.rowstate');
+    const actions = box.querySelector('.stateactions');
+    const note = box.querySelector('.statenote');
+
+    const reset = () => {
+      select.value = box.dataset.current;
+      actions.hidden = true;
+      note.value = '';
+      box.classList.remove('changed');
+    };
+
+    select.onchange = () => {
+      const changed = select.value !== box.dataset.current;
+
+      actions.hidden = !changed;
+      box.classList.toggle('changed', changed);
+
+      // A note only makes sense for a decision somebody is recording; going
+      // back into the queue is not a thing you annotate.
+      note.hidden = select.value === 'queued';
+      if (changed && !note.hidden) note.focus();
+    };
+
+    box.querySelector('.statecancel').onclick = reset;
+
+    note.onkeydown = event => {
+      if (event.key === 'Enter') box.querySelector('.statesave').click();
+      if (event.key === 'Escape') reset();
+    };
+
+    box.querySelector('.statesave').onclick = async () => {
+      const id = Number(box.dataset.row);
       const state = select.value;
-
-      const note = state === 'skipped' || state === 'manual'
-        ? prompt(state === 'skipped'
-          ? 'למה לא לשלוח? (אפשר להשאיר ריק)'
-          : 'הערה — איך זה טופל? (אפשר להשאיר ריק)', '')
-        : '';
-
-      if (note === null) { await load(); return; }
 
       try {
         const result = await api('/api/events/state', {
-          method: 'POST', body: JSON.stringify({ ids: [id], state, note })
+          method: 'POST',
+          body: JSON.stringify({ ids: [id], state, note: note.value.trim() })
         });
 
         if ((result.refused ?? []).length) {
@@ -615,6 +702,7 @@ function renderTable() {
       } catch (error) {
         $('err').hidden = false;
         $('err').textContent = error.message;
+        return;
       }
 
       await load();
@@ -673,8 +761,10 @@ const labelOf = key => LABELS[key] ?? key;
  * server would refuse anyway.
  */
 function stateControl(event) {
-  const fixed = ['sent', 'superseded'];
-  if (fixed.includes(event.handled.state)) return '';
+  // A row that really went out, or one closed because a newer status went in
+  // its place, has nothing to choose: un-sending is not a thing, and offering
+  // it would promise something the server refuses anyway.
+  if (['sent', 'superseded'].includes(event.handled.state)) return '';
 
   const current = ['manual', 'skipped'].includes(event.handled.state)
     ? event.handled.state : 'queued';
@@ -683,11 +773,21 @@ function stateControl(event) {
     '<option value="' + value + '"' + (current === value ? ' selected' : '') + '>' +
     text + '</option>';
 
-  return '<select class="rowstate" data-state="' + event.id + '">' +
-    option('queued', 'ממתין לשליחה') +
-    option('skipped', 'הוחלט לא לשלוח') +
-    option('manual', 'טופל ידנית') +
-    '</select>';
+  // Nothing is written until Save. Picking from a list is how you look at the
+  // options; it should not be how you commit to one — especially for a choice
+  // that decides whether a partner hears from us.
+  return '<div class="statebox" data-row="' + event.id + '" data-current="' + current + '">' +
+    '<select class="rowstate">' +
+      option('queued', 'ממתין לשליחה') +
+      option('skipped', 'הוחלט לא לשלוח') +
+      option('manual', 'טופל ידנית') +
+    '</select>' +
+    '<span class="stateactions" hidden>' +
+      '<input class="statenote" placeholder="הערה (לא חובה)" maxlength="120">' +
+      '<button class="statesave" title="שמירה">שמירה</button>' +
+      '<button class="statecancel" title="ביטול">ביטול</button>' +
+    '</span>' +
+    '</div>';
 }
 
 function renderBulk() {

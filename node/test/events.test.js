@@ -1422,3 +1422,93 @@ test('the ready filter pages on its own total', async () => {
   assert.equal(page.events.length, 2);
   assert.equal(page.counts.blocked, 2);
 });
+
+test('search finds a row by its event number', async () => {
+  const a = await db.recordStatusEvent({
+    leadId: 'e1', customerName: 'ראשון', leadNumber: '5000',
+    statusBefore: 'חדש', statusAfter: 'לא ענה', occurredAt: '2026-09-01T10:00:00Z'
+  });
+  const b = await db.recordStatusEvent({
+    leadId: 'e2', customerName: 'שני', leadNumber: '5001',
+    statusBefore: 'חדש', statusAfter: 'לא ענה', occurredAt: '2026-09-02T10:00:00Z'
+  });
+
+  const found = await (await call('/api/dashboard/events?search=' + a.id)).json();
+
+  assert.equal(found.total, 1);
+  assert.deepEqual(found.events.map(e => e.id), [a.id]);
+  assert.ok(b.id !== a.id);
+});
+
+test('an event number matches exactly, not as a substring', async () => {
+  // Otherwise searching for event 1 would drag in 10, 100 and 1000.
+  const rows = [];
+
+  for (let i = 0; i < 3; i++) {
+    rows.push(await db.recordStatusEvent({
+      leadId: `s${i}`, customerName: `לקוח ${i}`, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: `2026-09-0${i + 1}T10:00:00Z`
+    }));
+  }
+
+  const target = rows[0].id;
+  const found = await (await call('/api/dashboard/events?search=' + target)).json();
+
+  assert.deepEqual(found.events.map(e => e.id), [target]);
+});
+
+test('searching a number still finds a lead number too', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: 'L', customerName: 'אלון ברמן', leadNumber: '3313',
+    statusBefore: 'חדש', statusAfter: 'לא ענה', occurredAt: '2026-09-01T10:00:00Z'
+  });
+
+  const found = await (await call('/api/dashboard/events?search=3313')).json();
+
+  // The lead number matches even though it is not this row's event id.
+  assert.deepEqual(found.events.map(e => e.id), [id]);
+});
+
+test('search by event number works alongside the other filters', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: 'z', customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-01T10:00:00Z'
+  });
+
+  await db.markEventsManual([id], 'טופל');
+
+  const wrong = await (await call(
+    `/api/dashboard/events?search=${id}&delivery=sent`)).json();
+  assert.equal(wrong.total, 0);
+
+  const right = await (await call(
+    `/api/dashboard/events?search=${id}&delivery=manual`)).json();
+  assert.deepEqual(right.events.map(e => e.id), [id]);
+});
+
+test('a pending row superseded by a newer one says so in the future tense', async () => {
+  // Nothing has gone out for either yet, so "נשלח" would be a claim about a
+  // message that does not exist.
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-01T10:00:00Z'
+  });
+  const newer = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'לא ענה',
+    statusAfter: 'לא עונה 2', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-02T10:00:00Z'
+  });
+
+  const older = (await (await call('/api/dashboard/events?sort=asc')).json()).events[0];
+
+  assert.equal(older.handled.state, 'blocked');
+  assert.equal(older.handled.reason, 'יישלח במקומו הסטטוס העדכני');
+
+  // And once the newer one really goes out, the older one speaks in the past.
+  await db.markEventsNotified([newer.id], 'email', 'roi@example.com');
+
+  const after = (await (await call('/api/dashboard/events?sort=asc')).json()).events[0];
+  assert.equal(after.handled.state, 'superseded');
+  assert.equal(after.handled.label, 'נשלח הסטטוס העדכני');
+});

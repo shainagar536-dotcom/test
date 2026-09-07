@@ -243,7 +243,11 @@ export const DELIVERY_LABELS = {
   'source-not-in-recipients': 'המקור לא נמצא בטבלת הנמענים',
   'source-not-looked-up-yet': 'המקור עוד לא נבדק מול ה-CRM',
   'message-has-an-unfilled-value': 'חסר ערך בנוסח (סך הכל) — לא נשלח',
-  'a-newer-status-was-sent-instead': 'נשלח במקומו הסטטוס העדכני',
+  // Future tense on purpose. This reason only appears on a row that is still
+  // pending — nothing has gone out for it yet, and the newer status is what
+  // will go. Once the newer one is actually sent, the row moves to the
+  // 'superseded' state, which speaks in the past.
+  'a-newer-status-was-sent-instead': 'יישלח במקומו הסטטוס העדכני',
   'recipient-inactive': 'הנמען מושבת',
   'recipient-has-no-address': 'לנמען אין כתובת'
 };

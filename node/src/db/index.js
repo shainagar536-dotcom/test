@@ -1048,10 +1048,23 @@ export class Database {
 
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(customer_name ILIKE $${params.length}
-                OR lead_number   ILIKE $${params.length}
-                OR source_name   ILIKE $${params.length}
-                OR assignee_name ILIKE $${params.length})`);
+
+      const clauses = [
+        `customer_name ILIKE $${params.length}`,
+        `lead_number   ILIKE $${params.length}`,
+        `source_name   ILIKE $${params.length}`,
+        `assignee_name ILIKE $${params.length}`
+      ];
+
+      // An event number is an exact identifier — it is the number the sender
+      // quotes — so a digits-only search matches it exactly rather than as a
+      // substring, where "11" would also drag in 110 and 211.
+      if (/^\d+$/.test(search.trim())) {
+        params.push(Number(search.trim()));
+        clauses.push(`id = $${params.length}`);
+      }
+
+      where.push(`(${clauses.join(' OR ')})`);
     }
 
     if (status) {
@@ -1116,10 +1129,23 @@ export class Database {
 
     if (search) {
       params.push(`%${search}%`);
-      where.push(`(customer_name ILIKE $${params.length}
-                OR lead_number   ILIKE $${params.length}
-                OR source_name   ILIKE $${params.length}
-                OR assignee_name ILIKE $${params.length})`);
+
+      const clauses = [
+        `customer_name ILIKE $${params.length}`,
+        `lead_number   ILIKE $${params.length}`,
+        `source_name   ILIKE $${params.length}`,
+        `assignee_name ILIKE $${params.length}`
+      ];
+
+      // An event number is an exact identifier — it is the number the sender
+      // quotes — so a digits-only search matches it exactly rather than as a
+      // substring, where "11" would also drag in 110 and 211.
+      if (/^\d+$/.test(search.trim())) {
+        params.push(Number(search.trim()));
+        clauses.push(`id = $${params.length}`);
+      }
+
+      where.push(`(${clauses.join(' OR ')})`);
     }
 
     if (status) {
