@@ -450,6 +450,109 @@ export class Database {
     return rows[0];
   }
 
+  // -------------------------------------------------------- muted statuses
+  /** @returns {Promise<Array<object>>} */
+  async listMutedStatuses() {
+    const { rows } = await this.pool.query(
+      'SELECT status, note, updated_at FROM muted_statuses ORDER BY status');
+
+    return rows;
+  }
+
+  /** @param {{status: string, note?: string}} entry */
+  async saveMutedStatus({ status, note = '' }) {
+    const { rows } = await this.pool.query(
+      `INSERT INTO muted_statuses (status, note)
+       VALUES ($1, $2)
+       ON CONFLICT (status) DO UPDATE
+         SET note = EXCLUDED.note, updated_at = now()
+       RETURNING status, note, updated_at`,
+      [status, note]);
+
+    return rows[0];
+  }
+
+  /** @param {string} status */
+  async deleteMutedStatus(status) {
+    const { rowCount } = await this.pool.query(
+      'DELETE FROM muted_statuses WHERE status = $1', [status]);
+
+    return rowCount > 0;
+  }
+
+  /**
+   * Writes the shipped muted list into an empty table.
+   *
+   * @param {Array<string>} statuses
+   * @returns {Promise<number>}
+   */
+  async seedMutedStatuses(statuses) {
+    const { rows: [{ count }] } =
+      await this.pool.query('SELECT count(*)::int AS count FROM muted_statuses');
+
+    if (count > 0) return 0;
+
+    for (const status of statuses) await this.saveMutedStatus({ status });
+
+    return statuses.length;
+  }
+
+  /**
+   * Adds shipped templates that have no row yet, and touches nothing else.
+   *
+   * seedTemplates writes only into an empty table, which is right — it must
+   * never undo an edit. But it also means wording added to the code AFTER the
+   * first boot can never arrive: the table is not empty, so the seed is
+   * skipped forever, and the new statuses stay silent with nobody able to
+   * tell that from a deliberate choice.
+   *
+   * This is the missing half: purely additive, so an edited row keeps its
+   * text and a status nobody has wording for finally gets some.
+   *
+   * @param {Array<{status: string, message: string, channel?: string}>} rows
+   * @returns {Promise<{added: Array<string>, existing: number}>}
+   */
+  async addMissingTemplates(rows) {
+    const existing = new Set(
+      (await this.listTemplates()).map(row => normalizeText(row.status)));
+
+    const added = [];
+
+    for (const row of rows) {
+      if (existing.has(normalizeText(row.status))) continue;
+
+      await this.saveTemplate(row);
+      added.push(row.status);
+    }
+
+    return { added, existing: existing.size };
+  }
+
+  /**
+   * Statuses the log has seen that are in neither list.
+   *
+   * These already send nothing — the allowlist is closed — but until they are
+   * named, "not decided yet" is indistinguishable from "decided to stay
+   * quiet". Surfacing them is what turns the default from an accident into a
+   * choice.
+   *
+   * @returns {Promise<Array<{status: string, events: number}>>}
+   */
+  async unclassifiedStatuses() {
+    const { rows } = await this.pool.query(
+      `SELECT status_after AS status, count(*)::int AS events
+         FROM status_events
+        WHERE status_after <> ''
+        GROUP BY 1 ORDER BY 2 DESC`);
+
+    const known = new Set([
+      ...(await this.listTemplates()).map(row => normalizeText(row.status)),
+      ...(await this.listMutedStatuses()).map(row => normalizeText(row.status))
+    ]);
+
+    return rows.filter(row => !known.has(normalizeText(row.status)));
+  }
+
   /**
    * Writes the shipped recipient list into an empty table.
    *

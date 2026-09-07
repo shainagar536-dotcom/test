@@ -222,8 +222,14 @@
   .muted-list b { color: var(--ink); }
   .chip {
     display: inline-block; background: var(--none-bg); color: var(--none);
-    border-radius: 6px; padding: 2px 8px; margin: 3px 3px 0 0; font-size: 12.5px;
+    border-radius: 6px; padding: 2px 4px 2px 8px; margin: 3px 3px 0 0;
+    font-size: 12.5px;
   }
+  .chip button {
+    border: none; background: transparent; color: inherit; cursor: pointer;
+    padding: 0 4px; font-size: 13px; line-height: 1; opacity: .55;
+  }
+  .chip button:hover { opacity: 1; color: var(--blocked); }
   .pill { font-size: 11.5px; color: var(--muted); }
 
   /* A phone number or a UUID is left-to-right text sitting in a right-to-left
@@ -324,10 +330,14 @@
     <strong>נוסחי ההודעות</strong>
     <span class="pill" id="policyCount"></span>
     <span class="spacer" style="flex:1"></span>
+    <input id="newStatus" placeholder="שם סטטוס חדש" style="min-width:200px">
+    <button id="addTemplate">הוספת סטטוס</button>
     <button class="primary" id="savePolicy" disabled>שמירת שינויים</button>
   </div>
 
   <div id="policyConflict" class="error" hidden></div>
+  <div id="policyMissing" class="error" hidden style="background:var(--open-bg);color:var(--open)"></div>
+  <div id="policyUnknown" class="error" hidden style="background:var(--none-bg);color:var(--none)"></div>
 
   <div class="tablewrap">
     <table>
@@ -335,17 +345,27 @@
         <th style="width:22%">סטטוס</th>
         <th>נוסח ההודעה</th>
         <th style="width:11%">ערוץ ברירת מחדל</th>
-        <th style="width:8%">פעיל</th>
+        <th style="width:7%">פעיל</th>
+        <th style="width:7%"></th>
       </tr></thead>
       <tbody id="policyRows"></tbody>
     </table>
   </div>
 
   <div class="muted-list">
-    <b>סטטוסים שלא שולחים בהם כלום</b> — <span id="mutedCount"></span>.
-    השתקה היא ברירת המחדל בלי קשר: סטטוס בלי נוסח לא שולח כלום.
-    הרשימה קיימת כדי להבדיל בין "החלטנו לא לשלוח" לבין "עוד לא נכתב".
-    <div id="mutedChips" style="margin-top:8px"></div>
+    <div class="bar" style="margin-bottom:10px">
+      <b>סטטוסים שלא שולחים בהם כלום</b>
+      <span class="pill" id="mutedCount"></span>
+      <span class="spacer" style="flex:1"></span>
+      <input id="newMuted" placeholder="שם סטטוס להשתקה" style="min-width:220px">
+      <button id="addMuted">השתק סטטוס</button>
+    </div>
+
+    השתקה היא ברירת המחדל בלי קשר: <b>סטטוס בלי נוסח לא שולח כלום</b>, וזה
+    כולל סטטוס חדש שתוסיף ב-CRM ולא תגדיר כאן. הרשימה קיימת כדי להבדיל בין
+    "החלטנו לא לשלוח" לבין "עוד לא נכתב".
+
+    <div id="mutedChips" style="margin-top:10px"></div>
   </div>
 </section>
 
@@ -750,13 +770,53 @@ async function loadPolicy() {
   $('policyCount').textContent =
     data.templates.length + ' סטטוסים שולחים · ' + data.muted.length + ' מושתקים';
 
-  // Wording written for a status the policy mutes contradicts itself, and the
-  // wording wins at send time — so it is stated rather than left to be found.
+  // Wording that exists for a status the policy mutes contradicts itself, and
+  // the wording wins at send time — so it is stated rather than left to be found.
   $('policyConflict').hidden = !data.conflicts.length;
   if (data.conflicts.length) {
     $('policyConflict').textContent =
       'לסטטוסים האלה יש נוסח למרות שהם ברשימת המושתקים, ולכן הם כן ישלחו: ' +
       data.conflicts.join(', ');
+  }
+
+  // Wording that ships with the code but never reached this database. The
+  // seed only writes into an empty table, so it cannot arrive on its own.
+  $('policyMissing').hidden = !data.missing.length;
+  if (data.missing.length) {
+    $('policyMissing').innerHTML =
+      '<b>' + data.missing.length + ' נוסחים קיימים בקוד אבל לא במסד הזה</b> — ' +
+      esc(data.missing.map(m => m.status).join(', ')) +
+      '<br><button id="syncTemplates" style="margin-top:8px">הוסף אותם עכשיו</button>';
+
+    $('syncTemplates').onclick = async () => {
+      await api('/api/templates/sync', { method: 'POST' });
+      policyLoaded = false;
+      await loadPolicy();
+    };
+  }
+
+  // Statuses the log has seen that nobody has classified. They already send
+  // nothing; naming them turns that from an accident into a decision.
+  $('policyUnknown').hidden = !data.unclassified.length;
+  if (data.unclassified.length) {
+    $('policyUnknown').innerHTML =
+      '<b>סטטוסים שהופיעו ביומן ולא הוגדרו</b> — הם לא שולחים כלום (זו ברירת המחדל), ' +
+      'אבל כדאי להחליט עליהם:<br>' +
+      data.unclassified.map(u =>
+        '<span class="chip">' + esc(u.status) + ' (' + u.events + ')' +
+        '<button data-mute="' + esc(u.status) + '" title="השתק">🔇</button></span>').join(' ');
+
+    for (const button of $('policyUnknown').querySelectorAll('[data-mute]')) {
+      button.onclick = async () => {
+        await api('/api/muted', {
+          method: 'PUT',
+          body: JSON.stringify({ status: button.dataset.mute, note: 'הושתק מהדשבורד' })
+        });
+
+        policyLoaded = false;
+        await loadPolicy();
+      };
+    }
   }
 
   $('policyRows').innerHTML = data.templates.map((t, i) =>
@@ -769,30 +829,100 @@ async function loadPolicy() {
       '<option value="whatsapp"' + (t.channel === 'whatsapp' ? ' selected' : '') + '>וואטסאפ</option>' +
       '</select></td>' +
     '<td><input type="checkbox" data-field="active"' + (t.active ? ' checked' : '') + '></td>' +
+    '<td><button data-del="' + esc(t.status) + '">מחיקה</button></td>' +
     '</tr>').join('');
 
   $('mutedCount').textContent = data.muted.length + ' סטטוסים';
-  $('mutedChips').innerHTML =
-    data.muted.map(m => '<span class="chip">' + esc(m) + '</span>').join('');
+  $('mutedChips').innerHTML = data.muted.map(m =>
+    '<span class="chip">' + esc(m.status) +
+    '<button data-unmute="' + esc(m.status) + '" title="הסר מהרשימה">×</button></span>').join(' ');
+
+  for (const button of $('mutedChips').querySelectorAll('[data-unmute]')) {
+    button.onclick = async () => {
+      await api('/api/muted/' + encodeURIComponent(button.dataset.unmute),
+        { method: 'DELETE' });
+
+      policyLoaded = false;
+      await loadPolicy();
+    };
+  }
 
   for (const tr of $('policyRows').querySelectorAll('tr')) {
     const template = data.templates[Number(tr.dataset.i)];
 
     for (const field of tr.querySelectorAll('[data-field]')) {
       field.oninput = field.onchange = () => {
-        const row = {
+        policyEdits.set(template.status, {
           status: template.status,
           message: tr.querySelector('[data-field=message]').value,
           channel: tr.querySelector('[data-field=channel]').value,
           active: tr.querySelector('[data-field=active]').checked
-        };
+        });
 
-        policyEdits.set(template.status, row);
         tr.classList.add('dirty');
         $('savePolicy').disabled = false;
       };
     }
+
+    const remove = tr.querySelector('[data-del]');
+    if (remove) remove.onclick = async () => {
+      if (!confirm('למחוק את הנוסח של "' + template.status + '"?\n\n' +
+        'הסטטוס יפסיק לשלוח — סטטוס בלי נוסח שקט.')) return;
+
+      await api('/api/templates/' + encodeURIComponent(template.status),
+        { method: 'DELETE' });
+
+      policyLoaded = false;
+      await loadPolicy();
+    };
   }
+}
+
+$('addTemplate').onclick = async () => {
+  const status = $('newStatus').value.trim();
+  if (!status) { $('newStatus').focus(); return; }
+
+  try {
+    await api('/api/templates', {
+      method: 'PUT',
+      body: JSON.stringify([{ status, message: '', channel: 'email', active: true }])
+    });
+
+    $('newStatus').value = '';
+    policyLoaded = false;
+    await loadPolicy();
+  } catch (error) {
+    $('err').hidden = false;
+    $('err').textContent = error.message;
+  }
+};
+
+$('addMuted').onclick = async () => {
+  const status = $('newMuted').value.trim();
+  if (!status) { $('newMuted').focus(); return; }
+
+  const result = await api('/api/muted', {
+    method: 'PUT', body: JSON.stringify({ status, note: 'הושתק מהדשבורד' })
+  });
+
+  $('newMuted').value = '';
+
+  // Muting a status that has wording does nothing at send time: the wording
+  // wins. Better said than silently ignored.
+  if (result.conflicts?.length) {
+    $('err').hidden = false;
+    $('err').textContent = 'שים לב: ל־' + result.conflicts.join(', ') +
+      ' יש נוסח, ולכן הוא עדיין ישלח. מחק את הנוסח כדי להשתיק באמת.';
+  }
+
+  policyLoaded = false;
+  await loadPolicy();
+};
+
+for (const id of ['newStatus', 'newMuted']) {
+  $(id).addEventListener('keydown', e => {
+    if (e.key === 'Enter') $(id === 'newStatus' ? 'addTemplate' : 'addMuted').click();
+  });
 }
 
 $('savePolicy').onclick = async () => {

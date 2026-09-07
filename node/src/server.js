@@ -13,7 +13,7 @@ import { loadConfig, isWithinSchedule } from './config.js';
 import { Database } from './db/index.js';
 import { createApi } from './api/server.js';
 import { runSync } from './sync/run.js';
-import { SEED_TEMPLATES } from './notify/seeds.js';
+import { SEED_TEMPLATES, MUTED_STATUSES } from './notify/seeds.js';
 import { SEED_RECIPIENTS } from './notify/recipients-seed.js';
 
 const config = loadConfig();
@@ -28,6 +28,19 @@ if (seeded) console.log(`Seeded ${seeded} status templates.`);
 
 const seededRecipients = await db.seedRecipients(SEED_RECIPIENTS);
 if (seededRecipients) console.log(`Seeded ${seededRecipients} recipients.`);
+
+const seededMuted = await db.seedMutedStatuses(MUTED_STATUSES);
+if (seededMuted) console.log(`Seeded ${seededMuted} muted statuses.`);
+
+// The seed above only ever writes into an EMPTY table, so wording added to
+// the code after the first boot could never arrive on its own — the table is
+// not empty, the seed is skipped, and those statuses stay silent with nobody
+// able to tell that from a decision. This adds only what is missing and
+// leaves every existing row, edited or not, exactly as it is.
+const { added } = await db.addMissingTemplates(SEED_TEMPLATES);
+if (added.length) {
+  console.log(`Added wording for ${added.length} status(es): ${added.join(', ')}`);
+}
 
 console.log('Database ready.');
 

@@ -64,7 +64,7 @@ after(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query('TRUNCATE leads, changes, templates, recipients, sources, ' +
+  await db.pool.query('TRUNCATE leads, changes, templates, recipients, muted_statuses, sources, ' +
     'source_names, cursors, webhook_events, sync_runs');
 
   await db.pool.query("BEGIN; SET LOCAL app.allow_history_delete = 'on'; " +

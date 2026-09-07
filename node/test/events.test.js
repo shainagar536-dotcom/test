@@ -15,7 +15,8 @@ import { recordDelivery } from '../src/webhook/lead-updated.js';
 import { enrichEvent, enrichPending, SOURCE_STATE } from '../src/events/enrich.js';
 import { buildEventOutbox, SKIP } from '../src/notify/outbox.js';
 import { SurenseClient } from '../src/surense.js';
-import { SEED_TEMPLATES as SEED_TEMPLATES_FOR_TEST } from '../src/notify/seeds.js';
+import { SEED_TEMPLATES as SEED_TEMPLATES_FOR_TEST,
+  MUTED_STATUSES as MUTED_FOR_TEST } from '../src/notify/seeds.js';
 import { normalizeText } from '../src/mirror.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ??
@@ -128,7 +129,7 @@ after(async () => {
 
 /** History refuses deletion, so clearing it in a test says so explicitly. */
 const wipe = async () => {
-  await db.pool.query('TRUNCATE leads, changes, templates, recipients, sources, ' +
+  await db.pool.query('TRUNCATE leads, changes, templates, recipients, muted_statuses, sources, ' +
     'source_names, cursors, webhook_events, sync_runs');
 
   await db.pool.query(
@@ -812,13 +813,14 @@ test('a source with no address is kept, silent and visible', async () => {
 
 test('the policy tab reports wording that contradicts the muted list', async () => {
   await db.seedTemplates(SEED_TEMPLATES_FOR_TEST);
+  await db.seedMutedStatuses(MUTED_FOR_TEST);
 
   // 'חדש' is muted. Wording for it would send, so the contradiction is named.
   await db.saveTemplate({ status: 'חדש', message: 'לא אמור לצאת' });
 
   const body = await (await call('/api/dashboard/policy')).json();
 
-  assert.ok(body.muted.includes('חדש'));
+  assert.ok(body.muted.some(m => m.status === 'חדש'));
   assert.deepEqual(body.conflicts, ['חדש']);
 });
 
@@ -961,4 +963,160 @@ test('the channel column never shows an outcome as a channel', async () => {
   // "manual" is what happened, not how it would have gone out.
   assert.equal(body.events[0].display.channel, 'מייל');
   assert.equal(body.events[0].handled.state, 'manual');
+});
+
+
+// -------------------------------------------------- the policy is editable
+
+test('wording added to the code later still reaches an existing database', async () => {
+  // The seed only writes into an EMPTY table, which is right: it must never
+  // undo an edit. But it also means a status given wording after the first
+  // boot could never arrive — the table is not empty, so the seed is skipped
+  // forever and that status stays silent with nobody able to tell that from
+  // a decision. This is the half that was missing.
+  await db.seedTemplates([SEED_TEMPLATES_FOR_TEST[0]]);
+  assert.equal((await db.listTemplates()).length, 1);
+
+  // A second seed does nothing, because the table is not empty.
+  assert.equal(await db.seedTemplates(SEED_TEMPLATES_FOR_TEST), 0);
+
+  const { added } = await db.addMissingTemplates(SEED_TEMPLATES_FOR_TEST);
+
+  assert.equal(added.length, SEED_TEMPLATES_FOR_TEST.length - 1);
+  assert.equal((await db.listTemplates()).length, SEED_TEMPLATES_FOR_TEST.length);
+});
+
+test('adding the missing wording never overwrites an edit', async () => {
+  await db.seedTemplates(SEED_TEMPLATES_FOR_TEST);
+  await db.saveTemplate({ status: 'לא ענה', message: 'הנוסח שלי' });
+
+  await db.addMissingTemplates(SEED_TEMPLATES_FOR_TEST);
+
+  const row = (await db.listTemplates()).find(t => t.status === 'לא ענה');
+  assert.equal(row.message, 'הנוסח שלי');
+});
+
+test('the policy tab names the wording that never arrived', async () => {
+  await db.seedTemplates([SEED_TEMPLATES_FOR_TEST[0]]);
+
+  const body = await (await call('/api/dashboard/policy')).json();
+
+  assert.equal(body.templates.length, 1);
+  assert.equal(body.missing.length, SEED_TEMPLATES_FOR_TEST.length - 1);
+
+  const synced = await (await call('/api/templates/sync', { method: 'POST' })).json();
+  assert.equal(synced.addedCount, SEED_TEMPLATES_FOR_TEST.length - 1);
+
+  const after = await (await call('/api/dashboard/policy')).json();
+  assert.deepEqual(after.missing, []);
+});
+
+test('a status can be muted and unmuted from the API', async () => {
+  await db.seedMutedStatuses(['חדש']);
+
+  const added = await (await call('/api/muted', {
+    method: 'PUT', body: JSON.stringify({ status: 'סטטוס חדש שלי', note: 'לא רלוונטי' })
+  })).json();
+
+  assert.equal(added.saved, 1);
+  assert.ok(added.muted.some(m => m.status === 'סטטוס חדש שלי'));
+
+  const removed = await call('/api/muted/' + encodeURIComponent('סטטוס חדש שלי'),
+    { method: 'DELETE' });
+
+  assert.equal(removed.status, 200);
+
+  const body = await (await call('/api/dashboard/policy')).json();
+  assert.ok(!body.muted.some(m => m.status === 'סטטוס חדש שלי'));
+});
+
+test('muting a status that has wording is reported, not silently ignored', async () => {
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+
+  const result = await (await call('/api/muted', {
+    method: 'PUT', body: JSON.stringify({ status: 'לא ענה' })
+  })).json();
+
+  // The wording wins at send time, so muting it does nothing — worth saying.
+  assert.deepEqual(result.conflicts, ['לא ענה']);
+});
+
+test('a status nobody classified is listed, and sends nothing', async () => {
+  await db.seedTemplates(SEED_TEMPLATES_FOR_TEST);
+  await db.seedMutedStatuses(MUTED_FOR_TEST);
+
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'סטטוס שהומצא ב-CRM', sourceName: SOURCE_TITLE,
+    sourceState: 'resolved', occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  const body = await (await call('/api/dashboard/policy')).json();
+
+  assert.deepEqual(body.unclassified,
+    [{ status: 'סטטוס שהומצא ב-CRM', events: 1 }]);
+
+  // Already silent — the allowlist is closed. Listing it makes that a choice.
+  const outbox = await (await call('/api/outbox')).json();
+  assert.equal(outbox.readyToSend, 0);
+  assert.equal(Object.keys(outbox.skipped)[0], 'no-template');
+});
+
+test('a status given wording from the dashboard starts sending', async () => {
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'סטטוס משלי', sourceName: SOURCE_TITLE,
+    sourceState: 'resolved', occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  assert.equal((await (await call('/api/outbox')).json()).readyToSend, 0);
+
+  await call('/api/templates', {
+    method: 'PUT',
+    body: JSON.stringify([{ status: 'סטטוס משלי', message: 'נוסח שכתבתי באתר' }])
+  });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 1);
+  assert.match(outbox.messages[0].body, /נוסח שכתבתי באתר/);
+});
+
+test('a status can be added before its wording is written', async () => {
+  const response = await call('/api/templates', {
+    method: 'PUT', body: JSON.stringify([{ status: 'סטטוס חדש שלי' }])
+  });
+
+  assert.equal(response.status, 200);
+
+  const row = (await db.listTemplates()).find(t => t.status === 'סטטוס חדש שלי');
+
+  // Stored, but never sendable while it has no text.
+  assert.equal(row.message, '');
+  assert.equal(row.active, false);
+});
+
+test('an empty template never sends, even if switched on', async () => {
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'ריק', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  // Forced on directly in the database, bypassing the guard on the way in.
+  await db.saveTemplate({ status: 'ריק', message: '   ', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 0);
+  assert.equal(Object.keys(outbox.skipped)[0], 'no-template');
 });

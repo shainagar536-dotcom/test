@@ -63,7 +63,7 @@ after(async () => {
 
 beforeEach(async () => {
   await db.pool.query(
-    'TRUNCATE leads, changes, templates, recipients, source_names, sources, cursors');
+    'TRUNCATE leads, changes, templates, recipients, muted_statuses, source_names, sources, cursors');
 
   // History is append-only; clearing it in a test has to say so.
   await db.pool.query("BEGIN; SET LOCAL app.allow_history_delete = 'on'; " +
@@ -521,9 +521,23 @@ test('templates can be added, changed and removed through the API', async () => 
   assert.equal(templates.length, 1);
 });
 
-test('a template without a message is refused', async () => {
+test('a template without a message is accepted but cannot send', async () => {
+  // Adding a status before writing its wording is how you start, so this is
+  // allowed — but stored inactive, because wording nobody has written must
+  // never go out. The safety is kept; only the moment it is enforced moved.
   const response = await call('/api/templates',
     { method: 'PUT', body: JSON.stringify({ status: 'נסגר' }) });
+
+  assert.equal(response.status, 200);
+
+  const row = (await db.listTemplates()).find(t => t.status === 'נסגר');
+  assert.equal(row.message, '');
+  assert.equal(row.active, false);
+});
+
+test('a template with no status at all is still refused', async () => {
+  const response = await call('/api/templates',
+    { method: 'PUT', body: JSON.stringify({ message: 'טקסט בלי סטטוס' }) });
 
   assert.equal(response.status, 400);
 });

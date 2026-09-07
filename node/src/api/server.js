@@ -306,14 +306,26 @@ export function createApi({ db, config, fetchImpl }) {
     const body = await readJsonBody(request);
     const list = Array.isArray(body) ? body : [body];
 
-    const invalid = list.find(item => !item?.status || !item?.message);
+    const invalid = list.find(item => !item?.status);
     if (invalid) {
-      return { status: 400,
-        body: { error: 'Each template needs {status, message}.' } };
+      return { status: 400, body: { error: 'Each template needs {status}.' } };
     }
 
     const saved = [];
-    for (const item of list) saved.push(await db.saveTemplate(item));
+
+    for (const item of list) {
+      // A status can be added before its wording is written — that is how you
+      // start, and refusing it forces the text to be composed in one go. But
+      // wording nobody has written yet must never go out, so an empty message
+      // is stored inactive, and the sender skips an empty one either way.
+      const message = String(item.message ?? '');
+
+      saved.push(await db.saveTemplate({
+        ...item,
+        message,
+        active: message.trim() ? item.active !== false : false
+      }));
+    }
 
     return { saved: saved.length, templates: saved };
   });
@@ -767,6 +779,9 @@ export function createApi({ db, config, fetchImpl }) {
     const templates = await db.listTemplates();
     const shipped = new Map(SEED_TEMPLATES.map(t => [normalizeText(t.status), t.message]));
 
+    const known = new Set(templates.map(row => normalizeText(row.status)));
+    const muted = await db.listMutedStatuses();
+
     return {
       templates: templates.map(row => ({
         ...row,
@@ -775,16 +790,77 @@ export function createApi({ db, config, fetchImpl }) {
           shipped.get(normalizeText(row.status)) !== row.message
       })),
 
-      // Statuses deliberately given no wording. Silence is the default
-      // anyway; this is what separates "decided" from "not written yet".
-      muted: MUTED_STATUSES,
+      // Wording that ships with the code but has no row here. The seed only
+      // ever writes into an empty table — rightly, so it cannot undo an edit
+      // — which means anything added to the code later can never arrive on
+      // its own. Named here so it can be added in one click.
+      missing: SEED_TEMPLATES
+        .filter(t => !known.has(normalizeText(t.status)))
+        .map(t => ({ status: t.status, message: t.message })),
 
-      // Wording that exists for a status on the muted list contradicts the
-      // policy, so it is surfaced rather than left to be noticed.
+      // Statuses deliberately given no wording.
+      muted,
+
+      // Statuses the log has seen that are in neither list. They already send
+      // nothing; until they are named, that is an accident rather than a
+      // decision.
+      unclassified: await db.unclassifiedStatuses(),
+
+      // Wording that exists for a muted status contradicts the policy, and
+      // the wording wins at send time, so it is surfaced rather than left.
       conflicts: templates
-        .filter(row => MUTED_STATUSES.some(m => normalizeText(m) === normalizeText(row.status)))
+        .filter(row => muted.some(m => normalizeText(m.status) === normalizeText(row.status)))
         .map(row => row.status)
     };
+  });
+
+  // Adds the shipped wording for any status that has none. Purely additive:
+  // an edited template keeps its text.
+  route('POST', /^\/api\/templates\/sync$/, async () => {
+    const { added, existing } = await db.addMissingTemplates(SEED_TEMPLATES);
+
+    return { added, addedCount: added.length, existing };
+  });
+
+  // ---------------------------------------------------------------- muted
+  route('GET', /^\/api\/muted$/, async () =>
+    ({ muted: await db.listMutedStatuses() }));
+
+  route('PUT', /^\/api\/muted$/, async request => {
+    const body = await readJsonBody(request);
+    const list = Array.isArray(body) ? body : [body];
+
+    const entries = list
+      .map(item => ({
+        status: String(item?.status ?? '').trim(),
+        note: String(item?.note ?? '')
+      }))
+      .filter(item => item.status);
+
+    if (!entries.length) {
+      return { status: 400, body: { error: 'Each entry needs {status}.' } };
+    }
+
+    // Wording for a status wins over muting it, so muting one that has
+    // wording would be a contradiction that silently does nothing.
+    const templates = new Set(
+      (await db.listTemplates()).map(row => normalizeText(row.status)));
+
+    const conflicts = entries
+      .filter(item => templates.has(normalizeText(item.status)))
+      .map(item => item.status);
+
+    for (const entry of entries) await db.saveMutedStatus(entry);
+
+    return { saved: entries.length, conflicts, muted: await db.listMutedStatuses() };
+  });
+
+  route('DELETE', /^\/api\/muted\/(.+)$/, async (_request, params) => {
+    const removed = await db.deleteMutedStatus(decodeURIComponent(params[0]));
+
+    return removed
+      ? { deleted: true }
+      : { status: 404, body: { error: 'No such muted status.' } };
   });
 
   route('GET', /^\/api\/dashboard\/recipients$/, async (_request, _params, url) => {

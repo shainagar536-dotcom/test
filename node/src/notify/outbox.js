@@ -301,7 +301,13 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     // The closed allowlist: a status nobody has written wording for sends
     // nothing, which keeps the statuses still being decided quiet rather than
     // guessing at a message.
-    if (!template) { skip(SKIP.noTemplate); continue; }
+    // A template with no text yet is a status somebody has started defining,
+    // not one they meant to send blank. Checked here as well as on the way
+    // in, so ticking "active" on an empty one cannot produce an empty message.
+    if (!template || !String(template.message ?? '').trim()) {
+      skip(SKIP.noTemplate); continue;
+    }
+
     if (!template.active) { skip(SKIP.templateOff); continue; }
 
     if (event.source_state === 'absent') { skip(SKIP.noSource); continue; }

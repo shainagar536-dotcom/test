@@ -317,3 +317,17 @@ DROP TRIGGER IF EXISTS status_events_no_truncate ON status_events;
 CREATE TRIGGER status_events_no_truncate
     BEFORE TRUNCATE ON status_events
     FOR EACH STATEMENT EXECUTE FUNCTION status_events_no_delete();
+
+-- Statuses that must never produce a message.
+--
+-- Silence is already the default — a status with no template sends nothing —
+-- so a row here changes no behaviour on its own. It exists because "we
+-- decided not to send for this" and "nobody has written this one yet" look
+-- identical in an empty table, and only one of them is safe to fix by adding
+-- wording. Kept in the database, not only in code, so the decision can be
+-- made on the screen by the person who owns it.
+CREATE TABLE IF NOT EXISTS muted_statuses (
+    status     TEXT PRIMARY KEY,
+    note       TEXT        NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
