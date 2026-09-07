@@ -832,3 +832,133 @@ test('an edited template is marked as differing from the shipped one', async () 
   assert.equal(row.edited, true);
   assert.equal(row.shipped, 'ניסינו ליצור קשר עם הלקוח אין מענה 1');
 });
+
+// ------------------------------------------------- handled outside the code
+
+test('an event marked handled by hand leaves the queue', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  assert.equal((await (await call('/api/outbox')).json()).readyToSend, 1);
+
+  const marked = await (await call('/api/events/manual', {
+    method: 'POST',
+    body: JSON.stringify({ ids: [id], note: 'נשלח ידנית בוואטסאפ' })
+  })).json();
+
+  assert.deepEqual(marked.marked, [id]);
+
+  // The automation must not pick it up again.
+  assert.equal((await (await call('/api/outbox')).json()).readyToSend, 0);
+});
+
+test('a hand-marked event is never recorded as sent', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await call('/api/events/manual', {
+    method: 'POST', body: JSON.stringify({ ids: [id], note: 'דיברתי איתו' })
+  });
+
+  const body = await (await call('/api/dashboard/events')).json();
+  const row = body.events.find(e => e.id === id);
+
+  // The log must never claim we sent something we did not.
+  assert.equal(row.handled.state, 'manual');
+  assert.equal(row.handled.label, 'טופל ידנית');
+  assert.equal(row.handled.reason, 'דיברתי איתו');
+
+  assert.equal(body.counts.manual, 1);
+  assert.equal(body.counts.sent, 0);
+});
+
+test('a hand-marked event can be put back in the queue', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'חדש', statusAfter: 'לא ענה',
+    sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  await call('/api/events/manual', { method: 'POST', body: JSON.stringify({ ids: [id] }) });
+
+  const undone = await (await call('/api/events/manual/undo', {
+    method: 'POST', body: JSON.stringify({ ids: [id] })
+  })).json();
+
+  assert.deepEqual(undone.restored, [id]);
+  assert.equal((await (await call('/api/outbox')).json()).readyToSend, 1);
+});
+
+test('a message that really went out cannot be un-sent', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'חדש', statusAfter: 'לא ענה',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.markEventsNotified([id], 'email', 'roi@example.com');
+
+  // Clearing this would not recall the email — it would send a second one.
+  const undone = await (await call('/api/events/manual/undo', {
+    method: 'POST', body: JSON.stringify({ ids: [id] })
+  })).json();
+
+  assert.deepEqual(undone.restored, []);
+  assert.deepEqual(undone.refused, [id]);
+
+  const [event] = await db.listStatusEvents({});
+  assert.equal(event.notified_via, 'email');
+  assert.ok(event.notified_at);
+});
+
+test('handled-by-hand is its own filter, apart from sent', async () => {
+  const a = await db.recordStatusEvent({
+    leadId: 'm1', customerName: 'ידני', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-01T10:00:00Z'
+  });
+  const b = await db.recordStatusEvent({
+    leadId: 's1', customerName: 'נשלח', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-02T10:00:00Z'
+  });
+
+  await db.markEventsManual([a.id], 'טופל');
+  await db.markEventsNotified([b.id], 'email', 'a@b.c');
+
+  const manual = await (await call('/api/dashboard/events?delivery=manual')).json();
+  const sent = await (await call('/api/dashboard/events?delivery=sent')).json();
+
+  assert.deepEqual(manual.events.map(e => e.display.customer_name), ['ידני']);
+  assert.deepEqual(sent.events.map(e => e.display.customer_name), ['נשלח']);
+});
+
+test('the channel column never shows an outcome as a channel', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  await db.markEventsManual([id], 'דיברתי איתו');
+
+  const body = await (await call('/api/dashboard/events')).json();
+
+  // "manual" is what happened, not how it would have gone out.
+  assert.equal(body.events[0].display.channel, 'מייל');
+  assert.equal(body.events[0].handled.state, 'manual');
+});

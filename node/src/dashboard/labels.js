@@ -304,7 +304,18 @@ export function describeEvent(event, sendable, reasons, planned = new Map()) {
   // Closed because a later status went out in its place. Not "sent", because
   // nothing was sent for this row, and not "blocked", because nothing is
   // wrong — the source was told where the lead actually is.
-  const handled = event.superseded_by
+  // Handled by a person, outside this service. Not "sent": nothing was sent
+  // from here, and the log must never claim otherwise.
+  const handled = event.notified_via === 'manual'
+    ? {
+      state: 'manual',
+      label: 'טופל ידנית',
+      reason: event.notified_to || null,
+      at: formatDate(event.notified_at),
+      via: null,
+      to: null
+    }
+    : event.superseded_by
     ? {
       state: 'superseded',
       label: 'נשלח הסטטוס העדכני',
@@ -351,7 +362,10 @@ export function describeEvent(event, sendable, reasons, planned = new Map()) {
       // What it went out on once it has, and how it would go out before
       // then — so the column answers "email or WhatsApp" for every row, not
       // only for the ones already sent.
-      channel: event.notified_via && event.notified_via !== 'superseded'
+      // 'manual' and 'superseded' are outcomes, not channels. For those the
+      // column keeps showing how the message WOULD have gone, which is what
+      // the reader is asking of a column headed "ערוץ".
+      channel: event.notified_via && !['superseded', 'manual'].includes(event.notified_via)
         ? (CHANNEL_LABELS[event.notified_via] ?? event.notified_via)
         : (CHANNEL_LABELS[planned.get(id)] ?? planned.get(id) ?? '')
     },

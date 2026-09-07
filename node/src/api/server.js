@@ -657,6 +657,46 @@ export function createApi({ db, config, fetchImpl }) {
     };
   });
 
+  // Marks events as handled outside this service — "I already told them
+  // myself". They leave the queue exactly as a sent one does, but are
+  // recorded as 'manual', so the log never claims we sent something we did
+  // not.
+  route('POST', /^\/api\/events\/manual$/, async request => {
+    const body = await readJsonBody(request);
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
+
+    if (!ids.length) {
+      return { status: 400, body: { error: 'Send {"ids": [1, 2, 3], "note": "..."}.' } };
+    }
+
+    const { marked, alreadyHandled } = await db.markEventsManual(
+      ids, String(body.note ?? ''));
+
+    return { requested: ids.length, marked, alreadyHandled };
+  });
+
+  // Undoes a manual mark. Only a manual one: a message that really went out
+  // cannot be un-sent, and clearing its record would just send it twice.
+  route('POST', /^\/api\/events\/manual\/undo$/, async request => {
+    const body = await readJsonBody(request);
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
+
+    if (!ids.length) {
+      return { status: 400, body: { error: 'Send {"ids": [1, 2, 3]}.' } };
+    }
+
+    const { restored, refused } = await db.unmarkEventsManual(ids);
+
+    return {
+      requested: ids.length,
+      restored,
+
+      // Anything that was actually sent, or was never marked. Named rather
+      // than silently ignored.
+      refused
+    };
+  });
+
   // Reloads the whole id -> name catalog in one call. This is the endpoint
   // that fills in every source name at once.
   route('POST', /^\/api\/sources\/refresh$/, async () => {

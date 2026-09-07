@@ -108,7 +108,8 @@ export const SEED_RECIPIENTS = [
   { sourceName: "מטאור - רון טויטו", email: "office@rontwito.com", channel: "email", leads: 1 },
   { sourceName: "מטאור - רונן דוידוב", email: "ronen1367@gmail.com", channel: "email", leads: 11 },
   { sourceName: "מטאור - רונן קליקר", email: "noreply@ezcount.co.il", channel: "email", leads: 13 },
-  { sourceName: "מטאור - רועי כץ", email: "roei@katz-fin.co.il", channel: "email", leads: 25 },
+  // The CRM renamed this source; the old name matched no lead at all.
+  { sourceName: "סו\"ב רועי כץ", email: "roei@katz-fin.co.il", channel: "email", leads: 25 },
   { sourceName: "מטאור - רועי פרל", email: "notify@morning.co", channel: "email", leads: 6 },
   { sourceName: "מטאור - רועי ששון", email: "sassonins@gmail.com", channel: "email", leads: 1 },
   { sourceName: "מטאור - רפאל טבקה", email: "raphaeltebekaconsulting@gmail.com", channel: "email", leads: 3 },

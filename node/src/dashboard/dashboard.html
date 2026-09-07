@@ -134,6 +134,17 @@
   .b-blocked { color: var(--blocked); background: var(--blocked-bg); }
   .b-none    { color: var(--none);    background: var(--none-bg); }
   .b-waiting { color: var(--none);    background: var(--none-bg); }
+  .b-manual  { color: var(--accent);  background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+  .bulk {
+    display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
+    background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+    border: 1px solid var(--accent); border-radius: 10px;
+    padding: 9px 13px; margin-bottom: 12px;
+  }
+  .bulk b { font-size: 14px; }
+
+  td.pick, th.pick { width: 34px; text-align: center; padding-inline: 6px; }
 
   .why { color: var(--muted); font-size: 11.5px; margin-top: 2px; white-space: normal; }
 
@@ -269,6 +280,7 @@
       <option value="all">הכול</option>
       <option value="open">לא טופל</option>
       <option value="sent">נשלח</option>
+      <option value="manual">טופל ידנית</option>
     </select>
     <select id="channel">
       <option value="">כל הערוצים</option>
@@ -283,6 +295,13 @@
       <option value="100">100 בעמוד</option>
       <option value="250">250 בעמוד</option>
     </select>
+  </div>
+
+  <div id="bulk" class="bulk" hidden>
+    <b id="bulkCount"></b>
+    <button id="markManual">סמן כטופל ידנית — האוטומציה תדלג</button>
+    <button id="undoManual">ביטול סימון ידני</button>
+    <button id="clearPick">ניקוי הבחירה</button>
   </div>
 
   <div class="tablewrap">
@@ -377,6 +396,10 @@ const COLUMNS = [
   'status_before', 'status_after', 'assignee_name', 'source_name', 'channel'
 ];
 
+// Ids ticked in the table. Kept across a re-render so a filter change or a
+// refresh does not silently drop a selection somebody is part-way through.
+const picked = new Set();
+
 const state = {
   token: '', offset: 0, limit: 50,
   q: '', delivery: 'all', status: '', assignee: '', channel: '',
@@ -467,7 +490,8 @@ $('logout').onclick = () => {
 
 function badge(handled) {
   const cls = { sent:'b-sent', pending:'b-pending', blocked:'b-blocked',
-                waiting:'b-waiting', none:'b-none' }[handled.state];
+                waiting:'b-waiting', manual:'b-manual', superseded:'b-none',
+                none:'b-none' }[handled.state];
   let html = '<span class="badge ' + cls + '">' + esc(handled.label) + '</span>';
 
   if (handled.reason) html += '<div class="why">' + esc(handled.reason) + '</div>';
@@ -492,6 +516,7 @@ function renderCards(data) {
     card(n(c.open), 'לא טופלו', 'ממתינים לשליחה') +
     card(n(c.sent), 'נשלחו',
          'וואטסאפ ' + n(c.whatsapp) + ' · מייל ' + n(c.email)) +
+    card(n(c.manual), 'טופלו ידנית', 'האוטומציה מדלגת עליהם') +
     card(n(c.unresolved), 'מקור עוד לא זוהה', n(c.resolved) + ' זוהו') +
     card(n(data.recipients), 'נמענים מוגדרים',
          data.redirectAllTo ? 'פיילוט: הכול ל־' + esc(data.redirectAllTo) : 'שליחה חיה');
@@ -503,6 +528,7 @@ function renderTable() {
   const arrow = state.sort === 'asc' ? ' ↑' : ' ↓';
 
   $('head').innerHTML =
+    '<th class="pick"><input type="checkbox" id="pickAll" title="בחירת כל השורות בעמוד"></th>' +
     COLUMNS.map(c => c === 'occurred_at'
       ? '<th class="sortable" id="sortDate" title="לחץ כדי להפוך את הסדר">' +
         esc(labelOf(c)) + arrow + '</th>'
@@ -516,13 +542,41 @@ function renderTable() {
 
   $('rows').innerHTML = state.events.map((event, i) =>
     '<tr data-i="' + i + '">' +
+    '<td class="pick"><input type="checkbox" data-pick="' + event.id + '"' +
+      (picked.has(event.id) ? ' checked' : '') + '></td>' +
     COLUMNS.map(c => '<td>' + val(event.display[c]) + '</td>').join('') +
     '<td>' + badge(event.handled) + '</td>' +
     '</tr>').join('');
 
   for (const tr of $('rows').querySelectorAll('tr')) {
-    tr.onclick = () => openDrawer(state.events[Number(tr.dataset.i)]);
+    // A click on the checkbox selects; a click anywhere else opens the row.
+    tr.onclick = click => {
+      if (click.target.closest('.pick')) return;
+      openDrawer(state.events[Number(tr.dataset.i)]);
+    };
   }
+
+  for (const box of $('rows').querySelectorAll('[data-pick]')) {
+    box.onchange = () => {
+      const id = Number(box.dataset.pick);
+      if (box.checked) picked.add(id); else picked.delete(id);
+      renderBulk();
+    };
+  }
+
+  const all = $('pickAll');
+  if (all) {
+    all.checked = state.events.length > 0 && state.events.every(e => picked.has(e.id));
+
+    all.onchange = () => {
+      for (const e of state.events) {
+        if (all.checked) picked.add(e.id); else picked.delete(e.id);
+      }
+      renderTable();
+    };
+  }
+
+  renderBulk();
 
   const from = state.total ? state.offset + 1 : 0;
   const to = Math.min(state.offset + state.limit, state.total);
@@ -542,6 +596,49 @@ function renderTable() {
 
 let LABELS = {};
 const labelOf = key => LABELS[key] ?? key;
+
+function renderBulk() {
+  $('bulk').hidden = picked.size === 0;
+  $('bulkCount').textContent = 'נבחרו ' + picked.size + ' שורות';
+}
+
+async function bulk(path, extra = {}) {
+  if (!picked.size) return;
+
+  const ids = [...picked];
+
+  try {
+    const result = await api(path, {
+      method: 'POST', body: JSON.stringify({ ids, ...extra })
+    });
+
+    picked.clear();
+    await load();
+
+    // Anything the server would not do is said out loud rather than looking
+    // like it worked: a sent message cannot be un-sent, and an event already
+    // handled cannot be marked again.
+    const refused = (result.refused ?? result.alreadyHandled ?? []).length;
+
+    if (refused) {
+      $('err').hidden = false;
+      $('err').textContent = refused + ' שורות לא שונו — הן כבר טופלו, ' +
+        'או שהן נשלחו באמת ואי אפשר לבטל שליחה.';
+    }
+  } catch (error) {
+    $('err').hidden = false;
+    $('err').textContent = error.message;
+  }
+}
+
+$('markManual').onclick = () => {
+  const note = prompt('הערה (למשל: נשלח ידנית בוואטסאפ). אפשר להשאיר ריק:', '');
+  if (note === null) return;
+  bulk('/api/events/manual', { note });
+};
+
+$('undoManual').onclick = () => bulk('/api/events/manual/undo');
+$('clearPick').onclick = () => { picked.clear(); renderTable(); };
 
 function openDrawer(event) {
   $('dTitle').textContent = event.display.customer_name || event.leadId;

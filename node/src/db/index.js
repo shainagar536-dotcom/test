@@ -951,8 +951,9 @@ export class Database {
       where.push(`assignee_name = $${params.length}`);
     }
 
-    if (delivery === 'sent') where.push('notified_at IS NOT NULL');
+    if (delivery === 'sent') where.push("notified_at IS NOT NULL AND notified_via NOT IN ('manual', 'superseded')");
     if (delivery === 'open') where.push('notified_at IS NULL');
+    if (delivery === 'manual') where.push("notified_via = 'manual'");
 
     // Which channel a message actually went out on, so "what did we send by
     // WhatsApp" is a filter rather than a read-through.
@@ -1013,8 +1014,9 @@ export class Database {
       where.push(`assignee_name = $${params.length}`);
     }
 
-    if (delivery === 'sent') where.push('notified_at IS NOT NULL');
+    if (delivery === 'sent') where.push("notified_at IS NOT NULL AND notified_via NOT IN ('manual', 'superseded')");
     if (delivery === 'open') where.push('notified_at IS NULL');
+    if (delivery === 'manual') where.push("notified_via = 'manual'");
 
     if (channel) {
       params.push(channel);
@@ -1034,7 +1036,9 @@ export class Database {
     const { rows: [counts] } = await this.pool.query(
       `SELECT count(*)::int AS total,
               count(*) FILTER (WHERE notified_at IS NULL)::int      AS open,
-              count(*) FILTER (WHERE notified_at IS NOT NULL)::int  AS sent,
+              count(*) FILTER (WHERE notified_at IS NOT NULL
+                AND notified_via NOT IN ('manual', 'superseded'))::int AS sent,
+              count(*) FILTER (WHERE notified_via = 'manual')::int   AS manual,
               count(*) FILTER (WHERE notified_via = 'whatsapp')::int AS whatsapp,
               count(*) FILTER (WHERE notified_via = 'email')::int    AS email,
               count(*) FILTER (WHERE source_state = 'resolved')::int AS resolved,
@@ -1092,6 +1096,64 @@ export class Database {
       claimed,
       superseded,
       alreadyClaimed: ids.filter(id => !claimed.includes(Number(id)))
+    };
+  }
+
+  /**
+   * Marks events as handled outside this service.
+   *
+   * For the case where somebody has already told the source themselves. The
+   * event leaves the queue exactly as a sent one does — the automation will
+   * not pick it up — but it is recorded as 'manual', never as 'email', so
+   * the log never claims we sent something we did not.
+   *
+   * @param {Array<number>} ids
+   * @param {string} note   Free text, shown on the row.
+   * @returns {Promise<{marked: Array<number>, alreadyHandled: Array<number>}>}
+   */
+  async markEventsManual(ids, note = '') {
+    if (!ids.length) return { marked: [], alreadyHandled: [] };
+
+    const { rows } = await this.pool.query(
+      `UPDATE status_events
+          SET notified_at = now(), notified_via = 'manual', notified_to = $2
+        WHERE id = ANY($1) AND notified_at IS NULL
+        RETURNING id`,
+      [ids, note]);
+
+    const marked = rows.map(row => Number(row.id));
+
+    return {
+      marked,
+      alreadyHandled: ids.filter(id => !marked.includes(Number(id)))
+    };
+  }
+
+  /**
+   * Undoes a manual mark, putting the event back in the queue.
+   *
+   * Only a manual mark: a message that really went out cannot be un-sent, so
+   * clearing its record would just make the next run send it again. The
+   * WHERE clause is the whole safety property here, not a nicety.
+   *
+   * @param {Array<number>} ids
+   * @returns {Promise<{restored: Array<number>, refused: Array<number>}>}
+   */
+  async unmarkEventsManual(ids) {
+    if (!ids.length) return { restored: [], refused: [] };
+
+    const { rows } = await this.pool.query(
+      `UPDATE status_events
+          SET notified_at = NULL, notified_via = '', notified_to = ''
+        WHERE id = ANY($1) AND notified_via = 'manual'
+        RETURNING id`,
+      [ids]);
+
+    const restored = rows.map(row => Number(row.id));
+
+    return {
+      restored,
+      refused: ids.filter(id => !restored.includes(Number(id)))
     };
   }
 
