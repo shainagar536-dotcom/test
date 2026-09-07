@@ -669,6 +669,39 @@ export function createApi({ db, config, fetchImpl }) {
     };
   });
 
+  // Sets what happens to an event, from the screen.
+  //
+  //   queued  — put it back in the queue, so the next run sends it
+  //   manual  — somebody already told the source themselves
+  //   skipped — deliberately not sending this one
+  //
+  // All three are recorded as what they are. Neither 'manual' nor 'skipped'
+  // is ever written as 'email', because the log must never claim we sent
+  // something we did not.
+  route('POST', /^\/api\/events\/state$/, async request => {
+    const body = await readJsonBody(request);
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];
+    const state = String(body.state ?? '');
+
+    if (!ids.length || !['queued', 'manual', 'skipped'].includes(state)) {
+      return { status: 400, body: {
+        error: 'Send {"ids": [...], "state": "queued" | "manual" | "skipped"}.' } };
+    }
+
+    if (state === 'queued') {
+      const { restored, refused } = await db.unmarkEventsHandled(ids);
+
+      // A message that really went out cannot be un-sent: clearing its record
+      // would not recall it, it would send a second one.
+      return { requested: ids.length, restored, refused };
+    }
+
+    const { marked, alreadyHandled } = await db.markEventsHandled(
+      ids, state, String(body.note ?? ''));
+
+    return { requested: ids.length, marked, alreadyHandled };
+  });
+
   // Marks events as handled outside this service — "I already told them
   // myself". They leave the queue exactly as a sent one does, but are
   // recorded as 'manual', so the log never claims we sent something we did
@@ -820,6 +853,45 @@ export function createApi({ db, config, fetchImpl }) {
     const { added, existing } = await db.addMissingTemplates(SEED_TEMPLATES);
 
     return { added, addedCount: added.length, existing };
+  });
+
+  // Puts a template back to the wording that ships with the code.
+  //
+  // Deliberate and per-status, never automatic: a row that differs might be
+  // an edit somebody meant, or wording left over from an older version of
+  // the code. Only a person knows which, so the screen shows both texts and
+  // this endpoint acts on the ones they pick.
+  route('POST', /^\/api\/templates\/restore$/, async request => {
+    const body = await readJsonBody(request);
+    const wanted = Array.isArray(body.statuses) ? body.statuses.map(String) : [];
+
+    if (!wanted.length) {
+      return { status: 400, body: { error: 'Send {"statuses": ["...", "..."]}.' } };
+    }
+
+    const shipped = new Map(SEED_TEMPLATES.map(t => [normalizeText(t.status), t]));
+    const restored = [];
+
+    for (const status of wanted) {
+      const source = shipped.get(normalizeText(status));
+      if (!source) continue;
+
+      await db.saveTemplate({
+        status: source.status,
+        message: source.message,
+        active: true
+      });
+
+      restored.push(source.status);
+    }
+
+    return {
+      restored,
+      // Anything asked for that the code has no wording for — a status added
+      // on the screen has no shipped text to go back to.
+      unknown: wanted.filter(status =>
+        !shipped.has(normalizeText(status)))
+    };
   });
 
   // ---------------------------------------------------------------- muted

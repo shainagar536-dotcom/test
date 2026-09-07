@@ -261,6 +261,11 @@ export function deliveryLabel(reason) {
  * design — that is the point of the table, not a gap in it.
  */
 export const EVENT_LABELS = {
+  // The event's own id. Unique, short, and the same number the sender quotes
+  // when it reports what it sent — which makes it the one thing that ties a
+  // row on this screen to a message that went out.
+  id: 'מס׳ אירוע',
+
   occurred_at: 'מתי',
   customer_name: 'שם הלקוח',
   lead_number: 'מספר ליד',
@@ -306,7 +311,19 @@ export function describeEvent(event, sendable, reasons, planned = new Map()) {
   // wrong — the source was told where the lead actually is.
   // Handled by a person, outside this service. Not "sent": nothing was sent
   // from here, and the log must never claim otherwise.
-  const handled = event.notified_via === 'manual'
+  // Deliberately not sending this one. Worded apart from 'blocked', which is
+  // also "will not be sent" — but one is a decision somebody made and the
+  // other is something in the way, and they need opposite responses.
+  const handled = event.notified_via === 'skipped'
+    ? {
+      state: 'skipped',
+      label: 'הוחלט לא לשלוח',
+      reason: event.notified_to || null,
+      at: formatDate(event.notified_at),
+      via: null,
+      to: null
+    }
+    : event.notified_via === 'manual'
     ? {
       state: 'manual',
       label: 'טופל ידנית',
@@ -350,6 +367,7 @@ export function describeEvent(event, sendable, reasons, planned = new Map()) {
     id,
     leadId: event.lead_id,
     display: {
+      id: String(event.id),
       occurred_at: formatDate(event.occurred_at),
       customer_name: event.customer_name || '',
       lead_number: event.lead_number || '',
@@ -365,7 +383,8 @@ export function describeEvent(event, sendable, reasons, planned = new Map()) {
       // 'manual' and 'superseded' are outcomes, not channels. For those the
       // column keeps showing how the message WOULD have gone, which is what
       // the reader is asking of a column headed "ערוץ".
-      channel: event.notified_via && !['superseded', 'manual'].includes(event.notified_via)
+      channel: event.notified_via &&
+        !['superseded', 'manual', 'skipped'].includes(event.notified_via)
         ? (CHANNEL_LABELS[event.notified_via] ?? event.notified_via)
         : (CHANNEL_LABELS[planned.get(id)] ?? planned.get(id) ?? '')
     },

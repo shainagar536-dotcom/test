@@ -327,12 +327,12 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     if (!recipient) { skip(SKIP.noRecipient, event.source_name); continue; }
     if (!recipient.active) { skip(SKIP.recipientOff, event.source_name); continue; }
 
-    // How this source is reached is a property of the source, not of the
-    // wording: the same status goes to one partner by email and to another by
-    // WhatsApp. The template's channel is only a fallback for a row written
-    // before channels existed.
+    // How a source is reached belongs to the source, not to the wording: the
+    // same status goes to one partner by email and to another by WhatsApp.
+    // The template has no say in it at all — a per-message channel would only
+    // ever contradict the address the source actually has.
     const channel = recipient.channel ||
-      (recipient.email ? 'email' : recipient.whatsapp ? 'whatsapp' : template.channel);
+      (recipient.email ? 'email' : recipient.whatsapp ? 'whatsapp' : '');
 
     const address = channel === 'whatsapp' ? recipient.whatsapp : recipient.email;
     if (!address) { skip(SKIP.noAddress, event.source_name); continue; }

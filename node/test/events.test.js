@@ -15,6 +15,7 @@ import { recordDelivery } from '../src/webhook/lead-updated.js';
 import { enrichEvent, enrichPending, SOURCE_STATE } from '../src/events/enrich.js';
 import { buildEventOutbox, SKIP } from '../src/notify/outbox.js';
 import { SurenseClient } from '../src/surense.js';
+import { DELIVERY_LABELS as DELIVERY_LABELS_FOR_TEST } from '../src/dashboard/labels.js';
 import { SEED_TEMPLATES as SEED_TEMPLATES_FOR_TEST,
   MUTED_STATUSES as MUTED_FOR_TEST } from '../src/notify/seeds.js';
 import { normalizeText } from '../src/mirror.js';
@@ -1119,4 +1120,169 @@ test('an empty template never sends, even if switched on', async () => {
 
   assert.equal(outbox.readyToSend, 0);
   assert.equal(Object.keys(outbox.skipped)[0], 'no-template');
+});
+
+// ------------------------------------------------ wording that drifted
+
+test('wording that differs from the code is reported, not overwritten', async () => {
+  await db.seedTemplates(SEED_TEMPLATES_FOR_TEST);
+
+  // Exactly what production had: an older, shorter text for this status.
+  await db.saveTemplate({ status: 'ממתין לת.ז', message: 'ממתין לת.ז' });
+
+  const body = await (await call('/api/dashboard/policy')).json();
+  const row = body.templates.find(t => t.status === 'ממתין לת.ז');
+
+  assert.equal(row.edited, true);
+  assert.equal(row.message, 'ממתין לת.ז');
+  assert.equal(row.shipped, 'ממתין לאמצעי זיהוי מהלקוח');
+
+  // Adding what is missing must not touch it — only a person decides.
+  await db.addMissingTemplates(SEED_TEMPLATES_FOR_TEST);
+  assert.equal((await db.listTemplates())
+    .find(t => t.status === 'ממתין לת.ז').message, 'ממתין לת.ז');
+});
+
+test('a drifted template can be put back to the shipped wording', async () => {
+  await db.seedTemplates(SEED_TEMPLATES_FOR_TEST);
+  await db.saveTemplate({ status: 'ממתין לת.ז', message: 'ממתין לת.ז' });
+
+  const result = await (await call('/api/templates/restore', {
+    method: 'POST', body: JSON.stringify({ statuses: ['ממתין לת.ז'] })
+  })).json();
+
+  assert.deepEqual(result.restored, ['ממתין לת.ז']);
+
+  const row = (await db.listTemplates()).find(t => t.status === 'ממתין לת.ז');
+  assert.equal(row.message, 'ממתין לאמצעי זיהוי מהלקוח');
+});
+
+test('a status the code has no wording for cannot be restored', async () => {
+  const result = await (await call('/api/templates/restore', {
+    method: 'POST', body: JSON.stringify({ statuses: ['סטטוס שהמצאתי באתר'] })
+  })).json();
+
+  assert.deepEqual(result.restored, []);
+  assert.deepEqual(result.unknown, ['סטטוס שהמצאתי באתר']);
+});
+
+// ----------------------------------------------------- the row's own state
+
+test('a row can be set to never send, and back to the queue', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+  await db.saveRecipient({ sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true });
+
+  assert.equal((await (await call('/api/outbox')).json()).readyToSend, 1);
+
+  await call('/api/events/state', {
+    method: 'POST',
+    body: JSON.stringify({ ids: [id], state: 'skipped', note: 'לא רלוונטי' })
+  });
+
+  assert.equal((await (await call('/api/outbox')).json()).readyToSend, 0);
+
+  let row = (await (await call('/api/dashboard/events')).json()).events[0];
+  assert.equal(row.handled.state, 'skipped');
+  // Worded apart from 'blocked', which is also "will not be sent" — one is a
+  // decision, the other is something in the way.
+  assert.equal(row.handled.label, 'הוחלט לא לשלוח');
+  assert.notEqual(row.handled.label, DELIVERY_LABELS_FOR_TEST.blocked);
+  assert.equal(row.handled.reason, 'לא רלוונטי');
+
+  // Back into the queue, so it goes out on the next run.
+  await call('/api/events/state', {
+    method: 'POST', body: JSON.stringify({ ids: [id], state: 'queued' })
+  });
+
+  assert.equal((await (await call('/api/outbox')).json()).readyToSend, 1);
+
+  row = (await (await call('/api/dashboard/events')).json()).events[0];
+  assert.equal(row.handled.state, 'pending');
+});
+
+test('a sent row cannot be pushed back into the queue', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'חדש', statusAfter: 'לא ענה',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  await db.markEventsNotified([id], 'email', 'roi@example.com');
+
+  const result = await (await call('/api/events/state', {
+    method: 'POST', body: JSON.stringify({ ids: [id], state: 'queued' })
+  })).json();
+
+  assert.deepEqual(result.restored, []);
+  assert.deepEqual(result.refused, [id]);
+});
+
+test('an unknown state is refused rather than guessed at', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'חדש', statusAfter: 'לא ענה',
+    occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  const response = await call('/api/events/state', {
+    method: 'POST', body: JSON.stringify({ ids: [id], state: 'sent' })
+  });
+
+  // 'sent' is not something a person may set: the log records what happened.
+  assert.equal(response.status, 400);
+});
+
+test('the event id is on the row, so a sent message can be traced back', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-09-06T13:25:41Z'
+  });
+
+  const body = await (await call('/api/dashboard/events')).json();
+
+  assert.equal(body.events[0].display.id, String(id));
+  assert.equal(body.events[0].id, id);
+});
+
+test('the channel comes from the source even when the template disagrees', async () => {
+  await db.recordStatusEvent({
+    leadId: 'w', customerName: 'א', statusBefore: 'חדש', statusAfter: 'לא ענה',
+    sourceName: 'סוכן וואטסאפ', sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  // The template says email; the source is only reachable on WhatsApp. The
+  // template has no say — a per-message channel could only contradict the
+  // address the source actually has.
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1', channel: 'email' });
+  await db.saveRecipient({
+    sourceKey: 'סוכן וואטסאפ', sourceName: 'סוכן וואטסאפ',
+    whatsapp: '+972542471430', channel: 'whatsapp', active: true
+  });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.messages[0].channel, 'whatsapp');
+  assert.equal(outbox.messages[0].to, '+972542471430');
+});
+
+test('a source with no address is skipped, never guessed onto a channel', async () => {
+  await db.recordStatusEvent({
+    leadId: 'n', customerName: 'א', statusBefore: 'חדש', statusAfter: 'לא ענה',
+    sourceName: 'קמפיין', sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1', channel: 'email' });
+  await db.saveRecipient({ sourceKey: 'קמפיין', sourceName: 'קמפיין', active: true });
+
+  const outbox = await (await call('/api/outbox')).json();
+
+  assert.equal(outbox.readyToSend, 0);
+  assert.equal(Object.keys(outbox.skipped)[0], 'recipient-has-no-address');
 });

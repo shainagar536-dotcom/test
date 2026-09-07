@@ -1054,9 +1054,9 @@ export class Database {
       where.push(`assignee_name = $${params.length}`);
     }
 
-    if (delivery === 'sent') where.push("notified_at IS NOT NULL AND notified_via NOT IN ('manual', 'superseded')");
+    if (delivery === 'sent') where.push("notified_at IS NOT NULL AND notified_via NOT IN ('manual', 'skipped', 'superseded')");
     if (delivery === 'open') where.push('notified_at IS NULL');
-    if (delivery === 'manual') where.push("notified_via = 'manual'");
+    if (delivery === 'manual') where.push("notified_via IN ('manual', 'skipped')");
 
     // Which channel a message actually went out on, so "what did we send by
     // WhatsApp" is a filter rather than a read-through.
@@ -1117,9 +1117,9 @@ export class Database {
       where.push(`assignee_name = $${params.length}`);
     }
 
-    if (delivery === 'sent') where.push("notified_at IS NOT NULL AND notified_via NOT IN ('manual', 'superseded')");
+    if (delivery === 'sent') where.push("notified_at IS NOT NULL AND notified_via NOT IN ('manual', 'skipped', 'superseded')");
     if (delivery === 'open') where.push('notified_at IS NULL');
-    if (delivery === 'manual') where.push("notified_via = 'manual'");
+    if (delivery === 'manual') where.push("notified_via IN ('manual', 'skipped')");
 
     if (channel) {
       params.push(channel);
@@ -1140,8 +1140,9 @@ export class Database {
       `SELECT count(*)::int AS total,
               count(*) FILTER (WHERE notified_at IS NULL)::int      AS open,
               count(*) FILTER (WHERE notified_at IS NOT NULL
-                AND notified_via NOT IN ('manual', 'superseded'))::int AS sent,
+                AND notified_via NOT IN ('manual', 'skipped', 'superseded'))::int AS sent,
               count(*) FILTER (WHERE notified_via = 'manual')::int   AS manual,
+              count(*) FILTER (WHERE notified_via = 'skipped')::int  AS skipped,
               count(*) FILTER (WHERE notified_via = 'whatsapp')::int AS whatsapp,
               count(*) FILTER (WHERE notified_via = 'email')::int    AS email,
               count(*) FILTER (WHERE source_state = 'resolved')::int AS resolved,
@@ -1214,15 +1215,19 @@ export class Database {
    * @param {string} note   Free text, shown on the row.
    * @returns {Promise<{marked: Array<number>, alreadyHandled: Array<number>}>}
    */
-  async markEventsManual(ids, note = '') {
+  async markEventsHandled(ids, via = 'manual', note = '') {
     if (!ids.length) return { marked: [], alreadyHandled: [] };
+
+    // Only these two. Anything else would let a caller write 'email' here
+    // and make the log claim a send that never happened.
+    const kind = ['manual', 'skipped'].includes(via) ? via : 'manual';
 
     const { rows } = await this.pool.query(
       `UPDATE status_events
-          SET notified_at = now(), notified_via = 'manual', notified_to = $2
+          SET notified_at = now(), notified_via = $3, notified_to = $2
         WHERE id = ANY($1) AND notified_at IS NULL
         RETURNING id`,
-      [ids, note]);
+      [ids, note, kind]);
 
     const marked = rows.map(row => Number(row.id));
 
@@ -1242,13 +1247,13 @@ export class Database {
    * @param {Array<number>} ids
    * @returns {Promise<{restored: Array<number>, refused: Array<number>}>}
    */
-  async unmarkEventsManual(ids) {
+  async unmarkEventsHandled(ids) {
     if (!ids.length) return { restored: [], refused: [] };
 
     const { rows } = await this.pool.query(
       `UPDATE status_events
           SET notified_at = NULL, notified_via = '', notified_to = ''
-        WHERE id = ANY($1) AND notified_via = 'manual'
+        WHERE id = ANY($1) AND notified_via IN ('manual', 'skipped')
         RETURNING id`,
       [ids]);
 
@@ -1258,6 +1263,16 @@ export class Database {
       restored,
       refused: ids.filter(id => !restored.includes(Number(id)))
     };
+  }
+
+  /** @deprecated Use markEventsHandled. */
+  async markEventsManual(ids, note = '') {
+    return this.markEventsHandled(ids, 'manual', note);
+  }
+
+  /** @deprecated Use unmarkEventsHandled. */
+  async unmarkEventsManual(ids) {
+    return this.unmarkEventsHandled(ids);
   }
 
   /** Distinct values for the dashboard filters. */

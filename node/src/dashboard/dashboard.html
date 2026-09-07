@@ -135,6 +135,12 @@
   .b-none    { color: var(--none);    background: var(--none-bg); }
   .b-waiting { color: var(--none);    background: var(--none-bg); }
   .b-manual  { color: var(--accent);  background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .b-skipped { color: var(--none);    background: var(--none-bg); }
+
+  .rowstate {
+    display: block; margin-top: 5px; font-size: 12px;
+    padding: 2px 6px; border-radius: 6px; max-width: 130px;
+  }
 
   .bulk {
     display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
@@ -286,7 +292,7 @@
       <option value="all">הכול</option>
       <option value="open">לא טופל</option>
       <option value="sent">נשלח</option>
-      <option value="manual">טופל ידנית</option>
+      <option value="manual">טופל ידנית / לא יישלח</option>
     </select>
     <select id="channel">
       <option value="">כל הערוצים</option>
@@ -305,8 +311,9 @@
 
   <div id="bulk" class="bulk" hidden>
     <b id="bulkCount"></b>
-    <button id="markManual">סמן כטופל ידנית — האוטומציה תדלג</button>
-    <button id="undoManual">ביטול סימון ידני</button>
+    <button id="markManual">טופל ידנית</button>
+    <button id="markSkipped">הוחלט לא לשלוח</button>
+    <button id="undoManual">החזר לתור</button>
     <button id="clearPick">ניקוי הבחירה</button>
   </div>
 
@@ -337,6 +344,7 @@
 
   <div id="policyConflict" class="error" hidden></div>
   <div id="policyMissing" class="error" hidden style="background:var(--open-bg);color:var(--open)"></div>
+  <div id="policyDrift" class="error" hidden style="background:var(--open-bg);color:var(--open)"></div>
   <div id="policyUnknown" class="error" hidden style="background:var(--none-bg);color:var(--none)"></div>
 
   <div class="tablewrap">
@@ -344,9 +352,8 @@
       <thead><tr>
         <th style="width:22%">סטטוס</th>
         <th>נוסח ההודעה</th>
-        <th style="width:11%">ערוץ ברירת מחדל</th>
         <th style="width:7%">פעיל</th>
-        <th style="width:7%"></th>
+        <th style="width:13%"></th>
       </tr></thead>
       <tbody id="policyRows"></tbody>
     </table>
@@ -412,7 +419,7 @@ const KEY_TOKEN = 'surense.token';
 // The log's columns are fixed and few on purpose: this table holds only what
 // a notification needs, so there is nothing to choose between.
 const COLUMNS = [
-  'occurred_at', 'customer_name', 'lead_number',
+  'id', 'occurred_at', 'customer_name', 'lead_number',
   'status_before', 'status_after', 'assignee_name', 'source_name', 'channel'
 ];
 
@@ -510,8 +517,8 @@ $('logout').onclick = () => {
 
 function badge(handled) {
   const cls = { sent:'b-sent', pending:'b-pending', blocked:'b-blocked',
-                waiting:'b-waiting', manual:'b-manual', superseded:'b-none',
-                none:'b-none' }[handled.state];
+                waiting:'b-waiting', manual:'b-manual', skipped:'b-skipped',
+                superseded:'b-none', none:'b-none' }[handled.state];
   let html = '<span class="badge ' + cls + '">' + esc(handled.label) + '</span>';
 
   if (handled.reason) html += '<div class="why">' + esc(handled.reason) + '</div>';
@@ -536,7 +543,8 @@ function renderCards(data) {
     card(n(c.open), 'לא טופלו', 'ממתינים לשליחה') +
     card(n(c.sent), 'נשלחו',
          'וואטסאפ ' + n(c.whatsapp) + ' · מייל ' + n(c.email)) +
-    card(n(c.manual), 'טופלו ידנית', 'האוטומציה מדלגת עליהם') +
+    card(n(c.manual) , 'טופלו ידנית', 'האוטומציה מדלגת עליהם') +
+    card(n(c.skipped), 'הוחלט לא לשלוח', 'סומנו במפורש') +
     card(n(c.unresolved), 'מקור עוד לא זוהה', n(c.resolved) + ' זוהו') +
     card(n(data.recipients), 'נמענים מוגדרים',
          data.redirectAllTo ? 'פיילוט: הכול ל־' + esc(data.redirectAllTo) : 'שליחה חיה');
@@ -565,7 +573,7 @@ function renderTable() {
     '<td class="pick"><input type="checkbox" data-pick="' + event.id + '"' +
       (picked.has(event.id) ? ' checked' : '') + '></td>' +
     COLUMNS.map(c => '<td>' + val(event.display[c]) + '</td>').join('') +
-    '<td>' + badge(event.handled) + '</td>' +
+    '<td>' + badge(event.handled) + stateControl(event) + '</td>' +
     '</tr>').join('');
 
   for (const tr of $('rows').querySelectorAll('tr')) {
@@ -573,6 +581,38 @@ function renderTable() {
     tr.onclick = click => {
       if (click.target.closest('.pick')) return;
       openDrawer(state.events[Number(tr.dataset.i)]);
+    };
+  }
+
+  for (const select of $('rows').querySelectorAll('[data-state]')) {
+    select.onchange = async () => {
+      const id = Number(select.dataset.state);
+      const state = select.value;
+
+      const note = state === 'skipped' || state === 'manual'
+        ? prompt(state === 'skipped'
+          ? 'למה לא לשלוח? (אפשר להשאיר ריק)'
+          : 'הערה — איך זה טופל? (אפשר להשאיר ריק)', '')
+        : '';
+
+      if (note === null) { await load(); return; }
+
+      try {
+        const result = await api('/api/events/state', {
+          method: 'POST', body: JSON.stringify({ ids: [id], state, note })
+        });
+
+        if ((result.refused ?? []).length) {
+          $('err').hidden = false;
+          $('err').textContent =
+            'לא ניתן להחזיר לתור שורה שנשלחה באמת — ביטול שליחה לא מבטל את המייל.';
+        }
+      } catch (error) {
+        $('err').hidden = false;
+        $('err').textContent = error.message;
+      }
+
+      await load();
     };
   }
 
@@ -617,6 +657,32 @@ function renderTable() {
 let LABELS = {};
 const labelOf = key => LABELS[key] ?? key;
 
+/**
+ * The control for changing what happens to one row.
+ *
+ * Offered only where a change is possible. A row that was really sent, or one
+ * closed because a newer status went out in its place, has nothing to choose:
+ * un-sending is not a thing, and offering it would promise something the
+ * server would refuse anyway.
+ */
+function stateControl(event) {
+  const fixed = ['sent', 'superseded'];
+  if (fixed.includes(event.handled.state)) return '';
+
+  const current = ['manual', 'skipped'].includes(event.handled.state)
+    ? event.handled.state : 'queued';
+
+  const option = (value, text) =>
+    '<option value="' + value + '"' + (current === value ? ' selected' : '') + '>' +
+    text + '</option>';
+
+  return '<select class="rowstate" data-state="' + event.id + '">' +
+    option('queued', 'ממתין לשליחה') +
+    option('skipped', 'הוחלט לא לשלוח') +
+    option('manual', 'טופל ידנית') +
+    '</select>';
+}
+
 function renderBulk() {
   $('bulk').hidden = picked.size === 0;
   $('bulkCount').textContent = 'נבחרו ' + picked.size + ' שורות';
@@ -654,10 +720,16 @@ async function bulk(path, extra = {}) {
 $('markManual').onclick = () => {
   const note = prompt('הערה (למשל: נשלח ידנית בוואטסאפ). אפשר להשאיר ריק:', '');
   if (note === null) return;
-  bulk('/api/events/manual', { note });
+  bulk('/api/events/state', { state: 'manual', note });
 };
 
-$('undoManual').onclick = () => bulk('/api/events/manual/undo');
+$('markSkipped').onclick = () => {
+  const note = prompt('למה לא לשלוח? (אפשר להשאיר ריק)', '');
+  if (note === null) return;
+  bulk('/api/events/state', { state: 'skipped', note });
+};
+
+$('undoManual').onclick = () => bulk('/api/events/state', { state: 'queued' });
 $('clearPick').onclick = () => { picked.clear(); renderTable(); };
 
 function openDrawer(event) {
@@ -795,6 +867,32 @@ async function loadPolicy() {
     };
   }
 
+  // Wording that differs from the text shipped with the code. That is either
+  // an edit somebody meant, or a leftover from an older version — only a
+  // person can tell, so both texts are offered rather than one overwriting
+  // the other.
+  const drifted = data.templates.filter(t => t.edited);
+
+  $('policyDrift').hidden = !drifted.length;
+  if (drifted.length) {
+    $('policyDrift').innerHTML =
+      '<b>' + drifted.length + ' נוסחים שונים מהטקסט שבקוד</b> — ' +
+      esc(drifted.map(t => t.status).join(', ')) +
+      '<br><button id="restoreAll" style="margin-top:8px">החזר את כולם לנוסח שבקוד</button>';
+
+    $('restoreAll').onclick = async () => {
+      if (!confirm('להחזיר ' + drifted.length + ' נוסחים לטקסט שבקוד?')) return;
+
+      await api('/api/templates/restore', {
+        method: 'POST',
+        body: JSON.stringify({ statuses: drifted.map(t => t.status) })
+      });
+
+      policyLoaded = false;
+      await loadPolicy();
+    };
+  }
+
   // Statuses the log has seen that nobody has classified. They already send
   // nothing; naming them turns that from an accident into a decision.
   $('policyUnknown').hidden = !data.unclassified.length;
@@ -822,14 +920,12 @@ async function loadPolicy() {
   $('policyRows').innerHTML = data.templates.map((t, i) =>
     '<tr class="editrow" data-i="' + i + '">' +
     '<td><b>' + esc(t.status) + '</b>' +
-      (t.edited ? '<div class="pill">שונה מהמקור</div>' : '') + '</td>' +
+      (t.edited ? '<div class="pill">שונה מהנוסח שבקוד</div>' : '') + '</td>' +
     '<td><textarea data-field="message">' + esc(t.message) + '</textarea></td>' +
-    '<td><select data-field="channel">' +
-      '<option value="email"' + (t.channel === 'email' ? ' selected' : '') + '>מייל</option>' +
-      '<option value="whatsapp"' + (t.channel === 'whatsapp' ? ' selected' : '') + '>וואטסאפ</option>' +
-      '</select></td>' +
     '<td><input type="checkbox" data-field="active"' + (t.active ? ' checked' : '') + '></td>' +
-    '<td><button data-del="' + esc(t.status) + '">מחיקה</button></td>' +
+    '<td>' +
+      (t.edited ? '<button data-restore="' + esc(t.status) + '">שחזור הנוסח</button> ' : '') +
+      '<button data-del="' + esc(t.status) + '">מחיקה</button></td>' +
     '</tr>').join('');
 
   $('mutedCount').textContent = data.muted.length + ' סטטוסים';
@@ -855,7 +951,6 @@ async function loadPolicy() {
         policyEdits.set(template.status, {
           status: template.status,
           message: tr.querySelector('[data-field=message]').value,
-          channel: tr.querySelector('[data-field=channel]').value,
           active: tr.querySelector('[data-field=active]').checked
         });
 
@@ -863,6 +958,19 @@ async function loadPolicy() {
         $('savePolicy').disabled = false;
       };
     }
+
+    const restore = tr.querySelector('[data-restore]');
+    if (restore) restore.onclick = async () => {
+      if (!confirm('להחזיר את "' + template.status + '" לנוסח שבקוד?\n\n' +
+        'הנוסח הנוכחי:\n' + template.message + '\n\nהנוסח שבקוד:\n' + template.shipped)) return;
+
+      await api('/api/templates/restore', {
+        method: 'POST', body: JSON.stringify({ statuses: [template.status] })
+      });
+
+      policyLoaded = false;
+      await loadPolicy();
+    };
 
     const remove = tr.querySelector('[data-del]');
     if (remove) remove.onclick = async () => {
