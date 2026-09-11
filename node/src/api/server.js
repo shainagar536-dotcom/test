@@ -1041,6 +1041,93 @@ export function createApi({ db, config, fetchImpl }) {
     return { settings, auth, apiBase, apiError, sourceCatalog };
   });
 
+  // Which CRM field holds the amount the wording quotes.
+  //
+  // Two statuses say "בסך {total}", and a sentence that ends there is worse
+  // than no message at all. TOTAL_COLUMN names the field to read, but nobody
+  // can name a field they cannot see: the lead has around eighty of them,
+  // under machine keys, and the human label ("סך הכל") lives in the field
+  // schema rather than on the row. So this reads one real lead, joins the
+  // schema's labels to it, and names the fields that could plausibly be it.
+  //
+  // Read-only, and one lead at a time: it is a question, not a sync.
+  route('GET', /^\/api\/crm\/lead\/([^/]+)$/, async (_request, params) => {
+    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const leadId = decodeURIComponent(params[0]);
+
+    let lead;
+    try {
+      lead = await client.fetchLeadById(leadId);
+    } catch (error) {
+      return { status: 502, body: { error: error.message, leadId } };
+    }
+
+    // Labels are best-effort: without them the keys are still readable, and
+    // failing the whole answer because the schema call is unavailable would
+    // hide the field list that is the point of the route.
+    let labels = new Map();
+    try {
+      labels = new Map((await client.fetchFieldsRaw()).map(field => [
+        String(field?.key ?? field?.name ?? field?.field ?? ''),
+        String(field?.label ?? field?.title ?? field?.displayName ?? '')
+      ]));
+    } catch { /* keys only, then */ }
+
+    // What a total is called, in either language. Matched against the label
+    // as well as the key, because the key is where it hides.
+    const HINTS = ['סך', 'סכום', 'החזר', 'total', 'amount', 'sum', 'refund'];
+
+    const describe = (row) => Object.entries(row ?? {}).map(([key, value]) => ({
+      key,
+      label: labels.get(key) || null,
+      // Enough to recognise a number; never a whole free-text note.
+      sample: value === null || value === undefined || typeof value === 'object'
+        ? (value === null || value === undefined ? '' : JSON.stringify(value).slice(0, 60))
+        : String(value).slice(0, 60)
+    }));
+
+    const fields = describe(lead);
+
+    const candidates = fields.filter(field => HINTS.some(hint =>
+      field.key.toLowerCase().includes(hint) ||
+      (field.label ?? '').toLowerCase().includes(hint)));
+
+    // The amount may belong to the customer rather than to the lead, so any
+    // id on the lead that points at one is followed once.
+    const customerId = Object.entries(lead ?? {})
+      .find(([key, value]) => /^(customerId|clientId|customer_id)$/i.test(key) && value)?.[1];
+
+    let customer = null;
+
+    if (customerId) {
+      try {
+        const row = await client.request(
+          'GET', `/customers/${encodeURIComponent(String(customerId))}`);
+        const customerFields = describe(row?.fields ?? row?.data ?? row);
+
+        customer = {
+          id: String(customerId),
+          fields: customerFields,
+          candidates: customerFields.filter(field => HINTS.some(hint =>
+            field.key.toLowerCase().includes(hint) ||
+            (field.label ?? '').toLowerCase().includes(hint)))
+        };
+      } catch (error) {
+        customer = { id: String(customerId), error: error.message };
+      }
+    }
+
+    return {
+      leadId,
+      configured: config.messaging.columns.total || null,
+      // The answer, when there is one: set TOTAL_COLUMN to this key.
+      candidates,
+      customer,
+      totalFields: fields.length,
+      fields
+    };
+  });
+
   // ----------------------------------------------------------------- admin
   // Empties the lead mirror. The status history is NOT touched — the database
   // refuses to delete it — so this clears the cache and keeps the record.
