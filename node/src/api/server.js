@@ -1065,13 +1065,29 @@ export function createApi({ db, config, fetchImpl }) {
     // Labels are best-effort: without them the keys are still readable, and
     // failing the whole answer because the schema call is unavailable would
     // hide the field list that is the point of the route.
-    let labels = new Map();
+    let schema = [];
     try {
-      labels = new Map((await client.fetchFieldsRaw()).map(field => [
-        String(field?.key ?? field?.name ?? field?.field ?? ''),
-        String(field?.label ?? field?.title ?? field?.displayName ?? '')
-      ]));
+      schema = await client.fetchFieldsRaw();
     } catch { /* keys only, then */ }
+
+    const nameOf = (field) => String(field?.label ?? field?.title ??
+      field?.displayName ?? field?.name ?? field?.caption ?? '');
+
+    const labels = new Map(schema.map(field => [
+      String(field?.key ?? field?.name ?? field?.field ?? ''), nameOf(field)]));
+
+    // The custom fields are the interesting half: they arrive on the row as
+    // {fieldId, value} with no name at all, and the name is in the schema
+    // under whichever id-ish key it uses. Everything that could be an id is
+    // indexed, because guessing one and being wrong looks identical to the
+    // field not existing.
+    const byId = new Map();
+
+    for (const field of schema) {
+      for (const key of ['id', 'fieldId', 'key', 'uuid', 'guid']) {
+        if (field?.[key]) byId.set(String(field[key]), field);
+      }
+    }
 
     // What a total is called, in either language. Matched against the label
     // as well as the key, because the key is where it hides.
@@ -1087,6 +1103,33 @@ export function createApi({ db, config, fetchImpl }) {
     }));
 
     const fields = describe(lead);
+
+    // Custom fields, expanded: the id joined to its name, and every value the
+    // entry carries — which of value/valueText/numberValue holds the amount
+    // depends on the field's type, and naming one would hide the others.
+    const VALUE_KEYS = ['value', 'valueText', 'textValue', 'numberValue',
+      'decimalValue', 'displayValue', 'values'];
+
+    const custom = (Array.isArray(lead?.customFields) ? lead.customFields : [])
+      .map(entry => {
+        const definition = byId.get(String(entry?.fieldId ?? entry?.id ?? ''));
+        const value = Object.fromEntries(VALUE_KEYS
+          .filter(key => entry?.[key] !== undefined && entry?.[key] !== null)
+          .map(key => [key, String(
+            typeof entry[key] === 'object'
+              ? JSON.stringify(entry[key])
+              : entry[key]).slice(0, 80)]));
+
+        return {
+          fieldId: String(entry?.fieldId ?? entry?.id ?? ''),
+          label: definition ? nameOf(definition) : null,
+          type: entry?.type ?? null,
+          value,
+          // Kept when the join failed, so a mismatch is visible rather than
+          // looking like a field that simply has no name.
+          entryKeys: definition ? undefined : Object.keys(entry ?? {})
+        };
+      });
 
     const candidates = fields.filter(field => HINTS.some(hint =>
       field.key.toLowerCase().includes(hint) ||
@@ -1122,9 +1165,19 @@ export function createApi({ db, config, fetchImpl }) {
       configured: config.messaging.columns.total || null,
       // The answer, when there is one: set TOTAL_COLUMN to this key.
       candidates,
+
+      // Named on every response: the custom fields are where a Hebrew column
+      // like "סך הכל" actually lives, and they are invisible on the row.
+      customFields: custom,
+      customFieldsMatching: custom.filter(entry => HINTS.some(hint =>
+        (entry.label ?? '').toLowerCase().includes(hint))),
+
       customer,
       totalFields: fields.length,
-      fields
+      fields,
+
+      // Shown once so a failed join can be read rather than guessed at.
+      schemaSample: schema.slice(0, 2)
     };
   });
 
