@@ -210,6 +210,66 @@ export async function enrichEvent({
 }
 
 /**
+ * Fills in the amount on events that resolved before the field was known.
+ *
+ * enrichPending only looks at events whose source is unresolved, which is
+ * right — but it means every event already on the table keeps the empty
+ * amount it was recorded with, and the two messages that quote the amount
+ * stay held forever with nothing left to retry them.
+ *
+ * Only the statuses whose wording actually quotes the amount are read back,
+ * because each one costs a request to the CRM and the rest do not need it.
+ *
+ * @param {object} input
+ * @param {import('../db/index.js').Database} input.db
+ * @param {import('../surense.js').SurenseClient} input.client
+ * @param {object} input.config
+ * @param {number} [input.limit]
+ * @returns {Promise<{processed: number, filled: number, stillEmpty: number}>}
+ */
+export async function backfillAmounts({ db, client, config, limit = 50 }) {
+  const column = config.messaging.columns.total;
+  const summary = { processed: 0, filled: 0, stillEmpty: 0, column: column || null };
+
+  // With no column configured there is nothing to read, and every event would
+  // be fetched from the CRM to learn that.
+  if (!column) return summary;
+
+  const quotesAmount = (await db.listTemplates())
+    .filter(template => /\{\s*total\s*\}/.test(template.message ?? ''))
+    .map(template => template.status);
+
+  const events = await db.eventsMissingAmount({ statuses: quotesAmount, limit });
+
+  for (const event of events) {
+    let lead;
+
+    try {
+      lead = await client.fetchLeadById(event.lead_id);
+    } catch {
+      // The source is already resolved on this row; a failed read here costs
+      // the amount, not the event, and the next run tries again.
+      summary.processed++;
+      summary.stillEmpty++;
+      continue;
+    }
+
+    const amount = await readConfiguredValue(lead, client, column);
+
+    if (amount) {
+      await db.enrichStatusEvent(event.id, { ...event, amount });
+      summary.filled++;
+    } else {
+      summary.stillEmpty++;
+    }
+
+    summary.processed++;
+  }
+
+  return summary;
+}
+
+/**
  * Enriches everything still waiting.
  *
  * The catalog is refreshed at most once for the whole batch: a hundred events

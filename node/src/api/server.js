@@ -11,7 +11,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { runSync, syncInProgress } from '../sync/run.js';
 import { buildEventOutbox, summarizeSkips } from '../notify/outbox.js';
-import { enrichPending, refreshSourceCatalog } from '../events/enrich.js';
+import { enrichPending, backfillAmounts, refreshSourceCatalog } from '../events/enrich.js';
 import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
 import { SEED_TEMPLATES, MUTED_STATUSES } from '../notify/seeds.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
@@ -640,11 +640,16 @@ export function createApi({ db, config, fetchImpl }) {
   // repeatedly and safe to schedule: it only touches rows still waiting.
   route('POST', /^\/api\/events\/enrich$/, async (_request, _params, url) => {
     const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const limit = Number(url.searchParams.get('limit') ?? 25);
 
-    return enrichPending({
-      db, client, config,
-      limit: Number(url.searchParams.get('limit') ?? 25)
-    });
+    // The backfill, for events that resolved before TOTAL_COLUMN named the
+    // right field. Asked for explicitly: the normal pass leaves them alone,
+    // and re-reading leads from the CRM is not something to do by default.
+    if (url.searchParams.get('amounts') === 'true') {
+      return backfillAmounts({ db, client, config, limit });
+    }
+
+    return enrichPending({ db, client, config, limit });
   });
 
   // Claims events as sent. Two senders running at once get disjoint sets, so

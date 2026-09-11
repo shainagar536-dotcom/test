@@ -1004,6 +1004,39 @@ export class Database {
    * @param {object} [options]
    * @returns {Promise<Array<object>>}
    */
+  /**
+   * Events that resolved fine but carry no amount.
+   *
+   * The enrichment pass only looks at events whose source is unresolved, so
+   * once TOTAL_COLUMN is pointed at the right field the events already on the
+   * table keep their empty amount forever — resolved, held, and never looked
+   * at again. This is the backfill for exactly those.
+   *
+   * Narrowed to the statuses whose wording quotes the amount, because the
+   * rest do not need it and each one costs a CRM request. Sent events are
+   * left alone: their message is gone, and rereading it changes nothing.
+   *
+   * @param {object} input
+   * @param {Array<string>} input.statuses
+   * @param {number} [input.limit]
+   * @returns {Promise<Array<object>>}
+   */
+  async eventsMissingAmount({ statuses, limit = 50 }) {
+    if (!statuses?.length) return [];
+
+    const { rows } = await this.pool.query(
+      `SELECT * FROM status_events
+        WHERE source_state = 'resolved'
+          AND coalesce(amount, '') = ''
+          AND notified_at IS NULL
+          AND status_after = ANY($1)
+        ORDER BY id DESC
+        LIMIT $2`,
+      [statuses, limit]);
+
+    return rows;
+  }
+
   async pendingEnrichment({ limit = 25, maxAttempts = 5 } = {}) {
     const { rows } = await this.pool.query(
       `SELECT * FROM status_events

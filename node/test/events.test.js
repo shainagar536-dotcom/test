@@ -1650,3 +1650,67 @@ test('an amount nobody can send is held and quoted, not sent', () => {
   // The value is quoted so whoever fixes it knows what the CRM actually says.
   assert.equal(held.skipped[0].detail, 'סך הכל: 16,400 / 23,200');
 });
+
+test('the backfill fills amounts on events that resolved without one', async () => {
+  const { backfillAmounts } = await import('../src/events/enrich.js');
+
+  await db.saveTemplate({
+    status: 'הוגש', message: 'הוגשו החזרים בסך {total}', channel: 'email' });
+  await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1', channel: 'email' });
+
+  const quoting = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'בטיפול',
+    statusAfter: 'הוגש', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  // A status whose wording quotes nothing must not cost a CRM request.
+  await db.recordStatusEvent({
+    leadId: 'other', customerName: 'דנה', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  const read = [];
+  const client = {
+    fetchLeadById: async (id) => {
+      read.push(id);
+      return { customFields: [
+        { fieldId: '523c2e8e-fdc5-4200-8b65-b64e89da588b', value: '18,250' }] };
+    },
+    customFieldIds: async () =>
+      new Map([['סך הכל', '523c2e8e-fdc5-4200-8b65-b64e89da588b']])
+  };
+
+  const summary = await backfillAmounts({
+    db, client,
+    config: { messaging: { columns: { ...COLUMNS, total: 'סך הכל' } } }
+  });
+
+  assert.deepEqual(read, [LEAD], 'only the status that quotes an amount');
+  assert.equal(summary.filled, 1);
+
+  const [row] = await db.listStatusEvents({ ids: [quoting.id] });
+  assert.equal(row.amount, '18,250');
+});
+
+test('with no amount column configured the backfill reads no leads at all', async () => {
+  const { backfillAmounts } = await import('../src/events/enrich.js');
+
+  await db.saveTemplate({
+    status: 'הוגש', message: 'הוגשו החזרים בסך {total}', channel: 'email' });
+  await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'בטיפול',
+    statusAfter: 'הוגש', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  const summary = await backfillAmounts({
+    db,
+    client: { fetchLeadById: async () => assert.fail('must not read the CRM') },
+    config: { messaging: { columns: { ...COLUMNS, total: '' } } }
+  });
+
+  assert.equal(summary.processed, 0);
+  assert.equal(summary.column, null);
+});
