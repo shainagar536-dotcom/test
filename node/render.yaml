@@ -74,6 +74,12 @@ services:
       - key: LEAD_NUMBER_COLUMN
         value: number
 
+      # The "סך הכל" amount, which two of the messages quote. It is a custom
+      # field, so this is its label rather than a column on the row; the code
+      # joins the schema to find it. Empty holds those messages.
+      - key: TOTAL_COLUMN
+        value: סך הכל
+
       # --- Pilot safety net -------------------------------------------
       # While this holds an address, every message goes there instead of to
       # the referring source. Clearing it is the deliberate act that goes

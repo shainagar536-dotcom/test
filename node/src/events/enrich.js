@@ -37,6 +37,72 @@ export async function refreshSourceCatalog({ db, client, path }) {
   return { loaded: pairs.length, written };
 }
 
+/** A field id, as the CRM writes them. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The keys a custom-field entry might hold its value under. */
+const VALUE_KEYS = ['value', 'valueText', 'textValue', 'displayValue'];
+
+/**
+ * Reads a configured column off a lead, named or custom.
+ *
+ * "סך הכל" is not a field on the lead. The row carries a `customFields` list
+ * of {fieldId, value} with no names in it, and the name is in the schema —
+ * so a setting that only looked at `lead[name]` would find nothing and every
+ * message quoting the amount would be held forever, looking exactly like a
+ * CRM that does not have the column.
+ *
+ * The setting may therefore name either: a plain field, a custom field's id,
+ * or — the one a person would actually write — a custom field's label.
+ *
+ * Returns '' on any failure, which holds the message. That direction is
+ * deliberate: a missing amount stops a message, a wrong one sends a number
+ * to a partner.
+ *
+ * @param {object} lead
+ * @param {import('../surense.js').SurenseClient} client
+ * @param {string} name
+ * @returns {Promise<string>}
+ */
+export async function readConfiguredValue(lead, client, name) {
+  if (!name) return '';
+
+  // A plain field wins: it is the cheaper answer and needs no schema at all.
+  const direct = lead?.[name];
+  if (direct !== undefined && direct !== null && typeof direct !== 'object') {
+    return String(direct);
+  }
+
+  const entries = Array.isArray(lead?.customFields) ? lead.customFields : [];
+  if (!entries.length) return '';
+
+  let id = UUID.test(name) ? name : null;
+
+  if (!id) {
+    try {
+      id = (await client.customFieldIds()).get(name.trim()) ?? null;
+    } catch {
+      // The schema call failed. Holding the message is the safe answer.
+      return '';
+    }
+  }
+
+  if (!id) return '';
+
+  const entry = entries.find(row => String(row?.fieldId ?? row?.id ?? '') === id);
+  if (!entry) return '';
+
+  for (const key of VALUE_KEYS) {
+    const value = entry[key];
+    if (value !== undefined && value !== null && typeof value !== 'object') {
+      const text = String(value).trim();
+      if (text) return text;
+    }
+  }
+
+  return '';
+}
+
 /**
  * Enriches one recorded event.
  *
@@ -75,7 +141,7 @@ export async function enrichEvent({
   // Only read when a column is configured for it: with no column set, an
   // empty amount is the honest answer, and the wording that quotes it is
   // held rather than sent half-written.
-  const amount = columns.total ? String(lead[columns.total] ?? '') : '';
+  const amount = await readConfiguredValue(lead, client, columns.total);
 
   const { name: direct, id: sourceId } =
     resolveSourceName(lead, columns, sourceNames);

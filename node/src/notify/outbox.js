@@ -50,6 +50,31 @@ export const SKIP = {
 const UNFILLED = /\{[^{}]{1,60}\}/;
 
 /**
+ * Whether an amount can be dropped into "בסך …" and still be a sentence.
+ *
+ * "סך הכל" is a free-text column in the CRM, and people write in it: a real
+ * lead holds "16,400 / 23,200", another "- 140", another "0". Each of those
+ * renders into a claim about money that a partner would read as final —
+ * "הלקוח קיבל החזר ממס הכנסה בסך - 140" is not a thing anyone meant to say.
+ *
+ * So only a single positive number passes, commas and a currency mark and
+ * all. Anything else is held and named, because a held message is a question
+ * someone answers and a sent one is not.
+ *
+ * @param {?string} amount
+ * @returns {boolean}
+ */
+export function isSendableAmount(amount) {
+  const text = String(amount ?? '')
+    .replace(/[₪,\s]/g, '')
+    .replace(/ש"ח|שח/g, '');
+
+  if (!/^\d+(\.\d+)?$/.test(text)) return false;
+
+  return Number(text) > 0;
+}
+
+/**
  * Fills placeholders, treating a known-but-empty value as empty.
  *
  * render() leaves an empty value visible, which is right for a draft: an
@@ -340,8 +365,8 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     // The amount is the one value whose absence changes what the sentence
     // means: "הוגשו החזרים בסך" followed by nothing is not a message anyone
     // should receive. Held until the CRM supplies it.
-    if (/\{\s*total\s*\}/.test(template.message) && !event.amount) {
-      skip(SKIP.unfilled, '{total}');
+    if (/\{\s*total\s*\}/.test(template.message) && !isSendableAmount(event.amount)) {
+      skip(SKIP.unfilled, event.amount ? `סך הכל: ${event.amount}` : '{total}');
       continue;
     }
 

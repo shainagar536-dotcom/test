@@ -1565,3 +1565,88 @@ test('the outbox response always states the copy address', async () => {
   assert.ok('copyTo' in body);
   assert.equal(body.copyTo, null);
 });
+
+// ----------------------------------------------- the amount in the wording
+
+test('the amount is read out of the custom fields, not off the row', async () => {
+  const { readConfiguredValue } = await import('../src/events/enrich.js');
+
+  // The shape the CRM really returns: no named column, a list of ids.
+  const lead = {
+    fullName: 'עומרי מיטב',
+    customFields: [
+      { fieldId: '22ebc08e-f66e-4ca2-b13e-c6e331a2f17d', type: 6, value: 'הוגש ( 10 )' },
+      { fieldId: '523c2e8e-fdc5-4200-8b65-b64e89da588b', type: 6, value: '18,250' }
+    ]
+  };
+
+  const client = {
+    customFieldIds: async () => new Map([
+      ['2020', '22ebc08e-f66e-4ca2-b13e-c6e331a2f17d'],
+      ['סך הכל', '523c2e8e-fdc5-4200-8b65-b64e89da588b']
+    ])
+  };
+
+  // By the name a person would write in the setting.
+  assert.equal(await readConfiguredValue(lead, client, 'סך הכל'), '18,250');
+
+  // And by the id, for anyone who prefers the thing that cannot be renamed.
+  assert.equal(
+    await readConfiguredValue(lead, client, '523c2e8e-fdc5-4200-8b65-b64e89da588b'),
+    '18,250');
+
+  // A plain field still wins and costs no schema call at all.
+  assert.equal(
+    await readConfiguredValue(lead, { customFieldIds: async () => {
+      throw new Error('must not be called');
+    } }, 'fullName'),
+    'עומרי מיטב');
+});
+
+test('a schema that will not load holds the message instead of guessing', async () => {
+  const { readConfiguredValue } = await import('../src/events/enrich.js');
+
+  const amount = await readConfiguredValue(
+    { customFields: [{ fieldId: 'x', value: '18,250' }] },
+    { customFieldIds: async () => { throw new Error('403'); } },
+    'סך הכל');
+
+  // Empty holds the message. The other direction would send a number that
+  // came from whichever custom field happened to be first.
+  assert.equal(amount, '');
+});
+
+test('only a real amount is allowed into "בסך"', async () => {
+  const { isSendableAmount } = await import('../src/notify/outbox.js');
+
+  for (const good of ['18,250', '7700', '₪5,690', '1,200.50']) {
+    assert.equal(isSendableAmount(good), true, good);
+  }
+
+  // All three are real values sitting in the CRM's free-text "סך הכל" today.
+  for (const bad of ['', '16,400 / 23,200', '- 140', '0', 'בבדיקה']) {
+    assert.equal(isSendableAmount(bad), false, bad);
+  }
+});
+
+test('an amount nobody can send is held and quoted, not sent', () => {
+  const held = buildEventOutbox({
+    events: [{
+      id: 9, lead_id: LEAD, customer_name: 'אלון ברמן', status_before: 'בטיפול',
+      status_after: 'הוגש', source_name: SOURCE_TITLE, source_state: 'resolved',
+      amount: '16,400 / 23,200', occurred_at: '2026-09-06T09:00:00Z'
+    }],
+    templates: new Map([[normalizeText('הוגש'),
+      { status: 'הוגש', message: 'הוגשו החזרים בסך {total}', active: true }]]),
+    recipients: new Map([[normalizeText(SOURCE_TITLE),
+      { source_name: SOURCE_TITLE, email: 'roi@example.com',
+        channel: 'email', active: true }]]),
+    messaging: config.messaging
+  });
+
+  assert.equal(held.ready.length, 0);
+  assert.equal(held.skipped[0].reason, SKIP.unfilled);
+
+  // The value is quoted so whoever fixes it knows what the CRM actually says.
+  assert.equal(held.skipped[0].detail, 'סך הכל: 16,400 / 23,200');
+});

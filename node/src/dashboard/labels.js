@@ -242,7 +242,7 @@ export const DELIVERY_LABELS = {
   'source-id-not-mapped': 'מזהה המקור לא ממופה לשם',
   'source-not-in-recipients': 'המקור לא נמצא בטבלת הנמענים',
   'source-not-looked-up-yet': 'המקור עוד לא נבדק מול ה-CRM',
-  'message-has-an-unfilled-value': 'חסר ערך בנוסח (סך הכל) — לא נשלח',
+  'message-has-an-unfilled-value': 'סכום "סך הכל" חסר או לא תקין — לא נשלח',
   // Future tense on purpose. This reason only appears on a row that is still
   // pending — nothing has gone out for it yet, and the newer status is what
   // will go. Once the newer one is actually sent, the row moves to the

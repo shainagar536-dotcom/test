@@ -206,6 +206,40 @@ export class SurenseClient {
   }
 
   /**
+   * The custom fields, by the name a person knows them by.
+   *
+   * A lead's Hebrew columns — "סך הכל" among them — do not appear on the row
+   * as named fields at all. The row carries {fieldId, value}, and the name
+   * lives only in the field schema. So a setting like TOTAL_COLUMN can only
+   * be written in a UUID nobody can read, unless something joins the two.
+   *
+   * Cached for the life of the client: the schema is the same for every lead
+   * in a run, and re-reading it per event would turn one request into
+   * hundreds.
+   *
+   * @returns {Promise<Map<string, string>>}  label -> field id
+   */
+  async customFieldIds() {
+    if (this.customFieldIdCache) return this.customFieldIdCache;
+
+    const byLabel = new Map();
+
+    for (const field of await this.fetchFieldsRaw()) {
+      const id = field?.id ?? field?.fieldId;
+      const label = String(field?.label ?? field?.title ??
+        field?.displayName ?? '').trim();
+
+      // First definition wins. Labels are not guaranteed unique — the schema
+      // has more than one field labelled "#" — and a later one overwriting an
+      // earlier is how a setting silently starts reading the wrong column.
+      if (id && label && !byLabel.has(label)) byLabel.set(label, String(id));
+    }
+
+    this.customFieldIdCache = byLabel;
+    return byLabel;
+  }
+
+  /**
    * The referring-source catalog: every source, by id and name.
    *
    * `/customers/sources` is the path that actually serves this — confirmed
