@@ -292,6 +292,10 @@ export function createApi({ db, config, fetchImpl }) {
       // Surfaced on every response so a redirect left on by accident is
       // impossible to miss, and one left off before going live is obvious.
       redirectAllTo: config.messaging.redirectAllTo || null,
+
+      // Surfaced on every response so the sender never has to infer it.
+      copyTo: config.messaging.copyTo || null,
+
       floodBrake,
       skipped: summarizeSkips(skipped),
       messages: ready

@@ -377,6 +377,12 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
       to: redirected ? messaging.redirectAllTo : address,
       intendedFor: redirected ? address : null,
       redirected,
+
+      // Copied in, not redirected to: the source still gets the message.
+      // Empty while a pilot redirect is on, because then nothing is reaching
+      // a source anyway and a "copy" would be the only message there is.
+      copyTo: !redirected && messaging.copyTo ? messaging.copyTo : null,
+
       recipient: recipient.source_name,
       customer: event.customer_name,
       assignee: event.assignee_name,

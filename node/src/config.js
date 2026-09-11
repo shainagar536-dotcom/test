@@ -253,6 +253,14 @@ export function loadConfig() {
       // one real message per lead, and none of them can be recalled.
       maxPerRun: number('MAX_SENDS_PER_RUN', 25),
 
+      // A copy of every message, to somebody who wants to see what went out.
+      //
+      // Unlike REDIRECT_ALL_TO this does NOT change where the message goes:
+      // the source still receives it, and this address is added alongside.
+      // The two are independent on purpose — an operator watching the stream
+      // must not be a reason the partner stops getting told.
+      copyTo: optional('COPY_TO', ''),
+
       // Pilot safety net. While this holds an address, every message is
       // addressed to it instead of to the referring source — real leads, real
       // statuses, real wording, and nobody outside can receive one by

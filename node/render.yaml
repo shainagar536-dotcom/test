@@ -81,6 +81,12 @@ services:
       - key: REDIRECT_ALL_TO
         sync: false
 
+      # A copy of every message, alongside the source rather than instead of
+      # it. Independent of the redirect above on purpose: watching the stream
+      # must not be the reason a partner stops being told.
+      - key: COPY_TO
+        sync: false
+
 databases:
   - name: surense-db
     plan: basic-256mb        # free expires after 30 days; this does not

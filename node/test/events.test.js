@@ -1512,3 +1512,56 @@ test('a pending row superseded by a newer one says so in the future tense', asyn
   assert.equal(after.handled.state, 'superseded');
   assert.equal(after.handled.label, 'נשלח הסטטוס העדכני');
 });
+
+// ------------------------------------------------ a copy of what went out
+
+/** A resolved event with wording and an address: the ready-to-send shape. */
+function sendable(overrides = {}) {
+  return buildEventOutbox({
+    events: [{
+      id: 1, lead_id: LEAD, customer_name: 'אלון ברמן', assignee_name: 'שי נגר',
+      status_before: 'חדש', status_after: 'לא ענה', source_name: SOURCE_TITLE,
+      source_state: 'resolved', amount: '', occurred_at: '2026-09-06T09:00:00Z'
+    }],
+    templates: new Map([[normalizeText('לא ענה'),
+      { status: 'לא ענה', message: 'אין מענה 1', active: true }]]),
+    recipients: new Map([[normalizeText(SOURCE_TITLE),
+      { source_name: SOURCE_TITLE, email: 'roi@example.com',
+        channel: 'email', active: true }]]),
+    messaging: { ...config.messaging, ...overrides }
+  });
+}
+
+test('a copy address is added alongside the source, not instead of it', () => {
+  const { ready } = sendable({ copyTo: 'shai@example.com' });
+
+  // The distinction that matters: the partner still receives the message.
+  assert.equal(ready[0].to, 'roi@example.com');
+  assert.equal(ready[0].copyTo, 'shai@example.com');
+  assert.equal(ready[0].redirected, false);
+});
+
+test('with no copy address set the message carries none', () => {
+  assert.equal(sendable({ copyTo: '' }).ready[0].copyTo, null);
+});
+
+test('a pilot redirect leaves no copy to make', () => {
+  // Everything is already going to one address, so a "copy" would be the
+  // only message there is — and it would read as if a source had been told.
+  const { ready } = sendable({
+    copyTo: 'shai@example.com', redirectAllTo: 'shai@example.com'
+  });
+
+  assert.equal(ready[0].to, 'shai@example.com');
+  assert.equal(ready[0].intendedFor, 'roi@example.com');
+  assert.equal(ready[0].copyTo, null);
+});
+
+test('the outbox response always states the copy address', async () => {
+  const body = await (await call('/api/outbox')).json();
+
+  // Stated on every response for the same reason as the redirect: whoever
+  // sends must never have to guess who else is being shown the message.
+  assert.ok('copyTo' in body);
+  assert.equal(body.copyTo, null);
+});
