@@ -164,7 +164,24 @@ export function createApi({ db, config, fetchImpl }) {
    * Read per request, not cached: the whole point is that throwing the
    * switch on the screen takes effect on the next run, with no redeploy.
    */
-  const messagingNow = async () => ({ ...config.messaging, ...await db.deliverySettings() });
+  const messagingNow = async () => {
+    const stored = await db.deliverySettings();
+
+    return {
+      ...config.messaging,
+      ...stored,
+
+      // The amount column is nested, so a flat spread would replace the whole
+      // column map with one key and quietly lose the other five.
+      columns: {
+        ...config.messaging.columns,
+        total: stored.totalColumn ?? config.messaging.columns.total
+      }
+    };
+  };
+
+  /** The whole config, with the settings a person may change applied. */
+  const configNow = async () => ({ ...config, messaging: await messagingNow() });
 
   // ---------------------------------------------------------------- health
   // Unauthenticated on purpose: this is what an uptime pinger and Render's
@@ -657,15 +674,16 @@ export function createApi({ db, config, fetchImpl }) {
   route('POST', /^\/api\/events\/enrich$/, async (_request, _params, url) => {
     const client = new SurenseClient({ ...config.surense, fetchImpl });
     const limit = Number(url.searchParams.get('limit') ?? 25);
+    const effective = await configNow();
 
     // The backfill, for events that resolved before TOTAL_COLUMN named the
     // right field. Asked for explicitly: the normal pass leaves them alone,
     // and re-reading leads from the CRM is not something to do by default.
     if (url.searchParams.get('amounts') === 'true') {
-      return backfillAmounts({ db, client, config, limit });
+      return backfillAmounts({ db, client, config: effective, limit });
     }
 
-    return enrichPending({ db, client, config, limit });
+    return enrichPending({ db, client, config: effective, limit });
   });
 
   // Claims events as sent. Two senders running at once get disjoint sets, so
@@ -1183,7 +1201,7 @@ export function createApi({ db, config, fetchImpl }) {
 
     return {
       leadId,
-      configured: config.messaging.columns.total || null,
+      configured: (await messagingNow()).columns.total || null,
       // The answer, when there is one: set TOTAL_COLUMN to this key.
       candidates,
 
@@ -1215,6 +1233,11 @@ export function createApi({ db, config, fetchImpl }) {
       redirectAllTo: effective.redirectAllTo || '',
       copyTo: effective.copyTo || '',
 
+      // Which CRM field the two amount-quoting messages read. Empty holds
+      // them, which is why it belongs on the same screen as the switch:
+      // both are reasons a partner does not hear from us.
+      totalColumn: effective.columns.total || '',
+
       // Whether a message reaches its source at all — the plain-language
       // form of the same fact, because "redirectAllTo is set" is not how
       // anyone thinks about it.
@@ -1224,7 +1247,8 @@ export function createApi({ db, config, fetchImpl }) {
       // explicable rather than mysterious.
       source: {
         redirectAllTo: 'redirectAllTo' in stored ? 'dashboard' : 'environment',
-        copyTo: 'copyTo' in stored ? 'dashboard' : 'environment'
+        copyTo: 'copyTo' in stored ? 'dashboard' : 'environment',
+        totalColumn: 'totalColumn' in stored ? 'dashboard' : 'environment'
       }
     };
   });
@@ -1256,15 +1280,19 @@ export function createApi({ db, config, fetchImpl }) {
 
     if ('copyTo' in body) patch.copyTo = String(body.copyTo ?? '').trim();
 
-    for (const [key, value] of Object.entries(patch)) {
-      if (value && !value.includes('@')) {
+    // A field name, not an address — the CRM's label for the amount, or its
+    // id. Empty is meaningful: it holds the messages that quote an amount.
+    if ('totalColumn' in body) patch.totalColumn = String(body.totalColumn ?? '').trim();
+
+    for (const key of ['redirectAllTo', 'copyTo']) {
+      if (patch[key] && !patch[key].includes('@')) {
         return { status: 400, body: { error: `${key} must be an email address.` } };
       }
     }
 
     if (!Object.keys(patch).length) {
       return { status: 400, body: { error:
-        'Nothing to change. Send live, redirectAllTo or copyTo.' } };
+        'Nothing to change. Send live, redirectAllTo, copyTo or totalColumn.' } };
     }
 
     await db.saveDeliverySettings(patch);
@@ -1275,6 +1303,7 @@ export function createApi({ db, config, fetchImpl }) {
       saved: Object.keys(patch),
       redirectAllTo: effective.redirectAllTo || '',
       copyTo: effective.copyTo || '',
+      totalColumn: effective.columns.total || '',
       live: !effective.redirectAllTo
     };
   });

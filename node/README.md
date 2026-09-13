@@ -435,8 +435,10 @@ REDIRECT_ALL_TO=shai@example.com
 
 ```
 GET  /api/settings/delivery   → { live, redirectAllTo, copyTo, source }
-PUT  /api/settings/delivery   ← { live: true } | { live: false, redirectAllTo } | { copyTo }
+PUT  /api/settings/delivery   ← { live } | { redirectAllTo } | { copyTo } | { totalColumn }
 ```
+
+באותו TAB יושבת גם **העמודה שממנה נמשך הסכום** (`TOTAL_COLUMN`), מאותה סיבה בדיוק: שדה ריק שם הוא עוד דרך שבה שותף לא שומע מאיתנו, והמקום להחליט עליה הוא המסך ולא ה-deployment.
 
 `source` אומר על כל ערך אם הוא מגיע מהדשבורד או מהסביבה, כדי שהגדרה שמסרבת להשתנות תהיה מוסברת ולא מסתורית. **שורה בטבלה גוברת על משתנה הסביבה**, וטבלה ריקה לא משנה כלום — deployment קיים ממשיך להתנהג בדיוק כפי שהתנהג.
 

@@ -25,7 +25,7 @@ pg.types.setTypeParser(20, value => Number(value));
  * endpoint, and without this an unexpected key would be stored and silently
  * ignored, which reads as a saved setting that does nothing.
  */
-const DELIVERY_KEYS = new Set(['redirectAllTo', 'copyTo']);
+const DELIVERY_KEYS = new Set(['redirectAllTo', 'copyTo', 'totalColumn']);
 
 export class Database {
   /** @param {{url: string, ssl: object|false, maxConnections: number}} options */

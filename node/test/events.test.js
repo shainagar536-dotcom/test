@@ -1810,3 +1810,52 @@ test('an empty settings table leaves the environment in charge', async () => {
   assert.equal(body.source.copyTo, 'environment');
   assert.equal(body.live, true, 'this test config has no redirect set');
 });
+
+test('the amount column is set from the dashboard, not the environment', async () => {
+  const saved = await (await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ totalColumn: 'סך הכל' })
+  })).json();
+
+  assert.equal(saved.totalColumn, 'סך הכל');
+
+  const now = await (await call('/api/settings/delivery')).json();
+  assert.equal(now.source.totalColumn, 'dashboard');
+
+  // The nested column map survives: a flat merge would have replaced all six
+  // column names with this one key and broken every other lookup.
+  const probe = await (await call('/api/settings/delivery')).json();
+  assert.equal(probe.totalColumn, 'סך הכל');
+
+  // And the backfill now has a column to read, where before it had none.
+  const { backfillAmounts } = await import('../src/events/enrich.js');
+
+  await db.saveTemplate({
+    status: 'הוגש', message: 'הוגשו החזרים בסך {total}', channel: 'email' });
+  const held = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חתימה',
+    statusAfter: 'הוגש', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+    occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  const summary = await backfillAmounts({
+    db,
+    client: {
+      fetchLeadById: async () => ({ customFields: [{ fieldId: 'f1', value: '18,250' }] }),
+      customFieldIds: async () => new Map([['סך הכל', 'f1']])
+    },
+    config: { messaging: { columns: { ...COLUMNS, total: now.totalColumn } } }
+  });
+
+  assert.equal(summary.filled, 1);
+  assert.equal((await db.listStatusEvents({ ids: [held.id] }))[0].amount, '18,250');
+});
+
+test('a column name is not required to be an email address', async () => {
+  // The same endpoint carries two addresses and one field name, and the
+  // address check must not reject the field name for lacking an "@".
+  const ok = await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ totalColumn: 'סך הכל' })
+  });
+
+  assert.equal(ok.status, 200);
+});

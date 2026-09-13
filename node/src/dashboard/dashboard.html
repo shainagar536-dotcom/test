@@ -504,6 +504,16 @@
       </div>
     </div>
 
+    <div class="field">
+      <label for="totalColumn">העמודה ב-CRM שממנה נמשך הסכום</label>
+      <input type="text" id="totalColumn" placeholder="סך הכל">
+      <div class="switchsub">
+        שני נוסחים מצטטים סכום — <b>הוגש</b> ו-<b>טיפול הסתיים - שולם לקוח</b>.
+        אם השדה ריק, הם <b>נעצרים</b> ולא נשלחים, כי "הוגשו החזרים בסך" בלי מספר
+        זו לא הודעה. אפשר לכתוב את שם העמודה כפי שהיא מופיעה ב-CRM.
+      </div>
+    </div>
+
     <div class="bar" style="border:0;padding:0;margin-top:16px">
       <button class="primary" id="deliverySave">שמור</button>
       <span id="deliverySaved" class="card-sub" style="color:var(--muted)"></span>
@@ -1364,6 +1374,7 @@ function paintDelivery(data) {
   $('deliveryLive').checked = data.live;
   $('pilotTo').value = data.redirectAllTo || '';
   $('copyTo').value = data.copyTo || '';
+  $('totalColumn').value = data.totalColumn || '';
   $('pilotField').hidden = data.live;
 
   const box = $('deliveryState');
@@ -1404,7 +1415,11 @@ $('deliveryLive').onchange = () => {
 $('deliverySave').onclick = async () => {
   const live = $('deliveryLive').checked;
 
-  const payload = { live, copyTo: $('copyTo').value.trim() };
+  const payload = {
+    live,
+    copyTo: $('copyTo').value.trim(),
+    totalColumn: $('totalColumn').value.trim()
+  };
   if (!live) payload.redirectAllTo = $('pilotTo').value.trim();
 
   try {
