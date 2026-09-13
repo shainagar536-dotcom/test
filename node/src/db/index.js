@@ -1031,6 +1031,24 @@ export class Database {
    * @param {number} id
    * @param {object} patch
    */
+  /**
+   * Writes only the amount, and touches nothing else.
+   *
+   * The amount is not an enrichment of the source, and routing it through
+   * enrichStatusEvent conflated the two: that method sets source_state
+   * unconditionally, so a patch that only meant to add "18,250" knocked a
+   * resolved source back to 'pending' and spent an enrich attempt doing it.
+   * It healed itself on the next pass, which is exactly what made it the
+   * kind of bug that survives — nothing stayed broken long enough to notice.
+   *
+   * @param {number} id
+   * @param {string} amount
+   */
+  async setEventAmount(id, amount) {
+    await this.pool.query(
+      'UPDATE status_events SET amount = $2 WHERE id = $1', [id, String(amount ?? '')]);
+  }
+
   async enrichStatusEvent(id, patch) {
     await this.pool.query(
       `UPDATE status_events

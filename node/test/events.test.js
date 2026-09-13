@@ -1859,3 +1859,39 @@ test('a column name is not required to be an email address', async () => {
 
   assert.equal(ok.status, 200);
 });
+
+test('the amount backfill leaves the resolved source alone', async () => {
+  const { backfillAmounts } = await import('../src/events/enrich.js');
+
+  await db.saveTemplate({
+    status: 'הוגש', message: 'הוגשו החזרים בסך {total}', channel: 'email' });
+
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חתימה',
+    statusAfter: 'הוגש', sourceName: SOURCE_TITLE, sourceId: SOURCE,
+    sourceState: 'resolved', occurredAt: '2026-09-06T09:00:00Z'
+  });
+
+  const before = (await db.listStatusEvents({ ids: [id] }))[0];
+
+  await backfillAmounts({
+    db,
+    client: {
+      fetchLeadById: async () => ({ customFields: [{ fieldId: 'f1', value: '18,250' }] }),
+      customFieldIds: async () => new Map([['סך הכל', 'f1']])
+    },
+    config: { messaging: { columns: { ...COLUMNS, total: 'סך הכל' } } }
+  });
+
+  const after = (await db.listStatusEvents({ ids: [id] }))[0];
+
+  assert.equal(after.amount, '18,250');
+
+  // Everything else is untouched. Writing the amount through the enrichment
+  // path used to knock the source back to 'pending' and burn a retry, which
+  // healed itself on the next pass and so went unnoticed.
+  assert.equal(after.source_state, 'resolved');
+  assert.equal(after.source_name, SOURCE_TITLE);
+  assert.equal(after.source_id, before.source_id);
+  assert.equal(after.enrich_attempts, before.enrich_attempts);
+});

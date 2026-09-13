@@ -257,7 +257,9 @@ export async function backfillAmounts({ db, client, config, limit = 50 }) {
     const amount = await readConfiguredValue(lead, client, column);
 
     if (amount) {
-      await db.enrichStatusEvent(event.id, { ...event, amount });
+      // Only the amount. The source on this row is already resolved, and
+      // the enrichment writer would reset its state as a side effect.
+      await db.setEventAmount(event.id, amount);
       summary.filled++;
     } else {
       summary.stillEmpty++;
