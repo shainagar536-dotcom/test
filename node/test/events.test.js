@@ -131,7 +131,7 @@ after(async () => {
 /** History refuses deletion, so clearing it in a test says so explicitly. */
 const wipe = async () => {
   await db.pool.query('TRUNCATE leads, changes, templates, recipients, muted_statuses, sources, ' +
-    'source_names, cursors, webhook_events, sync_runs');
+    'source_names, cursors, webhook_events, sync_runs, settings');
 
   await db.pool.query(
     "BEGIN; SET LOCAL app.allow_history_delete = 'on'; " +
@@ -1713,4 +1713,100 @@ test('with no amount column configured the backfill reads no leads at all', asyn
 
   assert.equal(summary.processed, 0);
   assert.equal(summary.column, null);
+});
+
+// ------------------------------------------- the switch a person can reach
+
+test('the pilot redirect can be turned off from the dashboard', async () => {
+  // The service boots with a redirect in the environment, as production does.
+  const piloted = createApi({
+    db, fetchImpl: fetch,
+    config: { ...config,
+      messaging: { ...config.messaging, redirectAllTo: 'shai@example.com' } }
+  });
+
+  const server = piloted.listen(0);
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = (path, options) => fetch(`${base}${path}`, {
+    ...options,
+    headers: { Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json', ...(options?.headers ?? {}) }
+  });
+
+  try {
+    const before = await (await call('/api/settings/delivery')).json();
+    assert.equal(before.live, false, 'the environment starts it in pilot mode');
+    assert.equal(before.redirectAllTo, 'shai@example.com');
+    assert.equal(before.source.redirectAllTo, 'environment');
+
+    const saved = await (await call('/api/settings/delivery', {
+      method: 'PUT', body: JSON.stringify({ live: true, copyTo: 'shai@example.com' })
+    })).json();
+
+    assert.equal(saved.live, true);
+    assert.equal(saved.redirectAllTo, '', 'going live clears the redirect');
+
+    // The point of the whole thing: the sender now addresses the source.
+    await db.recordStatusEvent({
+      leadId: LEAD, customerName: 'אלון ברמן', statusBefore: 'חדש',
+      statusAfter: 'לא ענה', sourceName: SOURCE_TITLE, sourceState: 'resolved',
+      occurredAt: '2026-09-06T09:00:00Z'
+    });
+    await db.saveTemplate({ status: 'לא ענה', message: 'אין מענה 1' });
+    await db.saveRecipient({
+      sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+      email: 'roi@example.com', active: true
+    });
+
+    const outbox = await (await call('/api/outbox')).json();
+
+    assert.equal(outbox.redirectAllTo, null, 'the stored value wins over the env');
+    assert.equal(outbox.messages[0].to, 'roi@example.com');
+    assert.equal(outbox.messages[0].copyTo, 'shai@example.com',
+      'and the copy is added alongside, not instead');
+
+    // And the source of each value is reported, so a setting that will not
+    // budge is explicable rather than mysterious.
+    const after = await (await call('/api/settings/delivery')).json();
+    assert.equal(after.source.redirectAllTo, 'dashboard');
+  } finally {
+    server.close();
+  }
+});
+
+test('turning the pilot back on needs an address, or it sends to nowhere', async () => {
+  const refused = await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ live: false })
+  });
+
+  assert.equal(refused.status, 400);
+  assert.match((await refused.json()).error, /address/);
+
+  const ok = await (await call('/api/settings/delivery', {
+    method: 'PUT',
+    body: JSON.stringify({ live: false, redirectAllTo: 'shai@example.com' })
+  })).json();
+
+  assert.equal(ok.live, false);
+  assert.equal(ok.redirectAllTo, 'shai@example.com');
+});
+
+test('a delivery address that is not an address is refused', async () => {
+  const bad = await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ copyTo: 'not-an-email' })
+  });
+
+  assert.equal(bad.status, 400);
+
+  // And nothing was stored, so a typo cannot leave the setting half-changed.
+  const now = await (await call('/api/settings/delivery')).json();
+  assert.equal(now.copyTo, '');
+});
+
+test('an empty settings table leaves the environment in charge', async () => {
+  const body = await (await call('/api/settings/delivery')).json();
+
+  assert.equal(body.source.redirectAllTo, 'environment');
+  assert.equal(body.source.copyTo, 'environment');
+  assert.equal(body.live, true, 'this test config has no redirect set');
 });

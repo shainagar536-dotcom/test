@@ -152,6 +152,20 @@ export function createApi({ db, config, fetchImpl }) {
   const route = (method, pattern, handler, { auth = true } = {}) =>
     routes.push({ method, pattern, handler, auth });
 
+  /**
+   * The messaging settings as they actually apply right now.
+   *
+   * Where a message goes is a decision about the business, not about the
+   * deployment, so it belongs to the person who owns the partners — not to
+   * whoever can edit the environment. A stored row therefore wins over the
+   * environment variable, and the variable becomes the starting value rather
+   * than the last word.
+   *
+   * Read per request, not cached: the whole point is that throwing the
+   * switch on the screen takes effect on the next run, with no redeploy.
+   */
+  const messagingNow = async () => ({ ...config.messaging, ...await db.deliverySettings() });
+
   // ---------------------------------------------------------------- health
   // Unauthenticated on purpose: this is what an uptime pinger and Render's
   // own health check call, and it reveals nothing about anyone's data.
@@ -278,9 +292,11 @@ export function createApi({ db, config, fetchImpl }) {
     // An override for the one run after a bulk edit has been reviewed.
     const override = Number(url.searchParams.get('maxPerRun'));
 
+    const current = await messagingNow();
+
     const messaging = Number.isFinite(override) && override > 0
-      ? { ...config.messaging, maxPerRun: override }
-      : config.messaging;
+      ? { ...current, maxPerRun: override }
+      : current;
 
     const { ready, skipped, floodBrake } = buildEventOutbox({
       events, templates, recipients, messaging
@@ -291,10 +307,10 @@ export function createApi({ db, config, fetchImpl }) {
       readyToSend: ready.length,
       // Surfaced on every response so a redirect left on by accident is
       // impossible to miss, and one left off before going live is obvious.
-      redirectAllTo: config.messaging.redirectAllTo || null,
+      redirectAllTo: messaging.redirectAllTo || null,
 
       // Surfaced on every response so the sender never has to infer it.
-      copyTo: config.messaging.copyTo || null,
+      copyTo: messaging.copyTo || null,
 
       floodBrake,
       skipped: summarizeSkips(skipped),
@@ -1186,6 +1202,83 @@ export function createApi({ db, config, fetchImpl }) {
     };
   });
 
+  // ------------------------------------------------------------- delivery
+  // The one switch that decides whether partners hear from us at all, and
+  // the address that gets a copy. Both used to live only in the environment,
+  // which put them out of reach of the person they belong to.
+  route('GET', /^\/api\/settings\/delivery$/, async () => {
+    const stored = await db.deliverySettings();
+    const effective = await messagingNow();
+
+    return {
+      // What is in force. This is what the sender will actually do.
+      redirectAllTo: effective.redirectAllTo || '',
+      copyTo: effective.copyTo || '',
+
+      // Whether a message reaches its source at all — the plain-language
+      // form of the same fact, because "redirectAllTo is set" is not how
+      // anyone thinks about it.
+      live: !effective.redirectAllTo,
+
+      // Where each value came from, so a setting that refuses to change is
+      // explicable rather than mysterious.
+      source: {
+        redirectAllTo: 'redirectAllTo' in stored ? 'dashboard' : 'environment',
+        copyTo: 'copyTo' in stored ? 'dashboard' : 'environment'
+      }
+    };
+  });
+
+  route('PUT', /^\/api\/settings\/delivery$/, async request => {
+    const body = await readJsonBody(request);
+    const patch = {};
+
+    // `live` is the switch as a person thinks of it: on means the sources
+    // receive their messages. Expressed here as the absence of a redirect,
+    // which is what the sender actually reads.
+    if ('live' in body) {
+      if (body.live === true) patch.redirectAllTo = '';
+      else if (body.live === false) {
+        const address = String(body.redirectAllTo ?? body.copyTo ?? '').trim();
+
+        // Turning the pilot ON without saying where to send would redirect
+        // every message to nowhere, which reads as "sent" and is not.
+        if (!address) {
+          return { status: 400, body: { error:
+            'Pilot mode needs an address to redirect to: pass redirectAllTo.' } };
+        }
+
+        patch.redirectAllTo = address;
+      }
+    } else if ('redirectAllTo' in body) {
+      patch.redirectAllTo = String(body.redirectAllTo ?? '').trim();
+    }
+
+    if ('copyTo' in body) patch.copyTo = String(body.copyTo ?? '').trim();
+
+    for (const [key, value] of Object.entries(patch)) {
+      if (value && !value.includes('@')) {
+        return { status: 400, body: { error: `${key} must be an email address.` } };
+      }
+    }
+
+    if (!Object.keys(patch).length) {
+      return { status: 400, body: { error:
+        'Nothing to change. Send live, redirectAllTo or copyTo.' } };
+    }
+
+    await db.saveDeliverySettings(patch);
+
+    const effective = await messagingNow();
+
+    return {
+      saved: Object.keys(patch),
+      redirectAllTo: effective.redirectAllTo || '',
+      copyTo: effective.copyTo || '',
+      live: !effective.redirectAllTo
+    };
+  });
+
   // ----------------------------------------------------------------- admin
   // Empties the lead mirror. The status history is NOT touched — the database
   // refuses to delete it — so this clears the cache and keeps the record.
@@ -1258,7 +1351,7 @@ export function createApi({ db, config, fetchImpl }) {
       events: await db.allPendingEvents(),
       templates: templateMap,
       recipients: recipientMap,
-      messaging: { ...config.messaging, maxPerRun: Number.MAX_SAFE_INTEGER }
+      messaging: { ...await messagingNow(), maxPerRun: Number.MAX_SAFE_INTEGER }
     });
 
     const readyIds = decision.ready.map(item => item.eventId);
@@ -1312,7 +1405,7 @@ export function createApi({ db, config, fetchImpl }) {
       },
 
       recipients: recipientRows.length,
-      redirectAllTo: config.messaging.redirectAllTo || null,
+      redirectAllTo: (await messagingNow()).redirectAllTo || null,
       events: events.map(event => describeEvent(event, sendable, reasons, planned))
     };
   });
@@ -1455,7 +1548,7 @@ export function createApi({ db, config, fetchImpl }) {
         activeDays: config.sync.activeDays,
         activeHours: config.sync.activeHours,
         maxSendsPerRun: config.messaging.maxPerRun,
-        redirectAllTo: config.messaging.redirectAllTo || null,
+        redirectAllTo: (await messagingNow()).redirectAllTo || null,
         shrinkGuard: config.sync.shrinkGuard,
         svixSecretSet: Boolean(config.api.svixSecret)
       },

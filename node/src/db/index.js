@@ -18,6 +18,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // are well inside the safe range and JSON consumers expect numbers.
 pg.types.setTypeParser(20, value => Number(value));
 
+/**
+ * The settings a person may change from the dashboard.
+ *
+ * A closed list on purpose: the settings table is written through one
+ * endpoint, and without this an unexpected key would be stored and silently
+ * ignored, which reads as a saved setting that does nothing.
+ */
+const DELIVERY_KEYS = new Set(['redirectAllTo', 'copyTo']);
+
 export class Database {
   /** @param {{url: string, ssl: object|false, maxConnections: number}} options */
   constructor({ url, ssl, maxConnections }) {
@@ -452,6 +461,49 @@ export class Database {
 
   // -------------------------------------------------------- muted statuses
   /** @returns {Promise<Array<object>>} */
+  /**
+   * The delivery settings a person can change, as stored.
+   *
+   * Only keys that have a row come back. The caller merges them over the
+   * environment, so an untouched deployment behaves exactly as before and
+   * the first save is what takes control.
+   *
+   * @returns {Promise<Object<string, string>>}
+   */
+  async deliverySettings() {
+    const { rows } = await this.pool.query(
+      `SELECT key, value FROM settings WHERE key = ANY($1)`,
+      [[...DELIVERY_KEYS]]);
+
+    return Object.fromEntries(rows.map(row => [row.key, row.value]));
+  }
+
+  /**
+   * Writes the delivery settings.
+   *
+   * An empty string is a real value here, not a missing one: it is how the
+   * pilot redirect is turned off, which is the single most consequential
+   * thing this table does. So it is stored rather than skipped, and only
+   * keys absent from the patch are left alone.
+   *
+   * @param {Object<string, string>} patch
+   * @returns {Promise<Object<string, string>>}
+   */
+  async saveDeliverySettings(patch) {
+    for (const [key, value] of Object.entries(patch)) {
+      if (!DELIVERY_KEYS.has(key)) continue;
+
+      await this.pool.query(
+        `INSERT INTO settings (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, updated_at = now()`,
+        [key, String(value ?? '')]);
+    }
+
+    return this.deliverySettings();
+  }
+
   async listMutedStatuses() {
     const { rows } = await this.pool.query(
       'SELECT status, note, updated_at FROM muted_statuses ORDER BY status');

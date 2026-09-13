@@ -331,3 +331,19 @@ CREATE TABLE IF NOT EXISTS muted_statuses (
     note       TEXT        NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Delivery settings: who a message actually reaches.
+--
+-- These two lived only in the environment, which made them unreachable to
+-- the person they belong to. "Send for real" is a decision about the
+-- business, not about the deployment, and having it live in a Render field
+-- meant the one switch that decides whether partners hear from us at all
+-- could only be thrown by someone comfortable editing infrastructure.
+--
+-- A row here overrides the environment. An empty table changes nothing, so
+-- an existing deployment keeps behaving exactly as it did.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT        NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

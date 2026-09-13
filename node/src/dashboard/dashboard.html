@@ -317,6 +317,32 @@
     display: block; padding: 3px 0; font-size: 13px;
     break-inside: avoid; cursor: pointer; white-space: nowrap;
   }
+
+  /* --- the delivery switch ------------------------------------------- */
+  .switchrow { display: flex; gap: 14px; align-items: flex-start; }
+  .switchtitle { font-weight: 600; }
+  .switchsub { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+
+  .switch { position: relative; display: inline-block; width: 46px; height: 26px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span {
+    position: absolute; inset: 0; cursor: pointer; border-radius: 999px;
+    background: var(--line); transition: background .15s;
+  }
+  .switch span::before {
+    content: ''; position: absolute; width: 20px; height: 20px; top: 3px;
+    inset-inline-start: 3px; background: #fff; border-radius: 50%;
+    transition: transform .15s;
+  }
+  .switch input:checked + span { background: var(--sent); }
+  .switch input:checked + span::before { transform: translateX(-20px); }
+
+  .field { margin-top: 18px; max-width: 420px; }
+  .field label { display: block; font-size: 13px; margin-bottom: 6px; }
+  .field input {
+    width: 100%; padding: 9px 11px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: inherit;
+  }
 </style>
 </head>
 <body>
@@ -337,6 +363,7 @@
     <button class="tab on" data-tab="log">יומן</button>
     <button class="tab" data-tab="policy">נוסחי הודעות</button>
     <button class="tab" data-tab="recipients">מקורות ונמענים</button>
+    <button class="tab" data-tab="delivery">שליחה</button>
   </nav>
   <span id="stamp" class="card-sub" style="color:var(--muted);font-size:12px"></span>
   <span class="spacer"></span>
@@ -439,6 +466,48 @@
     "החלטנו לא לשלוח" לבין "עוד לא נכתב".
 
     <div id="mutedChips" style="margin-top:10px"></div>
+  </div>
+</section>
+
+<section id="pane-delivery" hidden>
+  <div class="bar">
+    <b>מצב שליחה</b>
+    <span class="spacer" style="flex:1"></span>
+    <span class="pill" id="deliveryState"></span>
+  </div>
+
+  <div class="tablewrap" style="padding:18px">
+    <div id="deliveryBanner" class="error" hidden></div>
+
+    <div class="switchrow">
+      <label class="switch">
+        <input type="checkbox" id="deliveryLive">
+        <span></span>
+      </label>
+      <div>
+        <div class="switchtitle">שליחה אמיתית — המקורות מקבלים את ההודעות</div>
+        <div class="switchsub" id="deliveryHint"></div>
+      </div>
+    </div>
+
+    <div class="field" id="pilotField" hidden>
+      <label for="pilotTo">כתובת הבדיקה — הכול יגיע לשם במקום למקורות</label>
+      <input type="email" id="pilotTo" placeholder="כתובת מייל לבדיקה">
+    </div>
+
+    <div class="field">
+      <label for="copyTo">שלח לי עותק של כל הודעה (אפשר להשאיר ריק)</label>
+      <input type="email" id="copyTo" placeholder="כתובת מייל לעותק">
+      <div class="switchsub">
+        העותק <b>נוסף</b> לנמען — המקור מקבל את ההודעה שלו בכל מקרה.
+        בזמן מצב בדיקה אין עותק, כי ממילא הכול מגיע לכתובת אחת.
+      </div>
+    </div>
+
+    <div class="bar" style="border:0;padding:0;margin-top:16px">
+      <button class="primary" id="deliverySave">שמור</button>
+      <span id="deliverySaved" class="card-sub" style="color:var(--muted)"></span>
+    </div>
   </div>
 </section>
 
@@ -920,7 +989,7 @@ $('next').onclick = () => { state.offset += state.limit; load(); };
 
 // ------------------------------------------------------------------- tabs
 
-const PANES = ['log', 'policy', 'recipients'];
+const PANES = ['log', 'policy', 'recipients', 'delivery'];
 let policyLoaded = false;
 let recipsLoaded = false;
 
@@ -933,6 +1002,7 @@ for (const tab of document.querySelectorAll('.tab')) {
 
     if (tab.dataset.tab === 'policy' && !policyLoaded) loadPolicy();
     if (tab.dataset.tab === 'recipients' && !recipsLoaded) loadRecipients();
+    if (tab.dataset.tab === 'delivery') loadDelivery();
   };
 }
 
@@ -1284,6 +1354,72 @@ async function boot() {
 
   load();
 }
+
+// ------------------------------------------------------------- delivery
+// The switch that decides whether partners hear from us at all. Stated in
+// the words a person uses about it — "the sources receive their messages" —
+// rather than in the name of the variable underneath.
+
+function paintDelivery(data) {
+  $('deliveryLive').checked = data.live;
+  $('pilotTo').value = data.redirectAllTo || '';
+  $('copyTo').value = data.copyTo || '';
+  $('pilotField').hidden = data.live;
+
+  const box = $('deliveryState');
+  box.textContent = data.live ? 'שליחה אמיתית' : 'מצב בדיקה';
+  box.style.color = data.live ? 'var(--sent)' : 'var(--open)';
+
+  $('deliveryHint').textContent = data.live
+    ? 'כל מקור מקבל את ההודעה שלו, כרגיל.'
+    : 'כבוי: כרגע כל ההודעות מגיעות לכתובת הבדיקה למטה, ואף מקור לא מקבל כלום.';
+
+  const banner = $('deliveryBanner');
+  banner.hidden = data.live;
+
+  if (!data.live) {
+    banner.textContent =
+      'שים לב: כל עוד זה כבוי, השותפים לא מקבלים שום הודעה. ' +
+      'הכול נשלח אל ' + (data.redirectAllTo || '(לא הוגדרה כתובת)') + '.';
+  }
+}
+
+async function loadDelivery() {
+  try {
+    paintDelivery(await api('/api/settings/delivery'));
+    $('deliverySaved').textContent = '';
+  } catch (error) {
+    if (error.unauthorized) return openGate('הטוקן נדחה.');
+    $('err').hidden = false;
+    $('err').textContent = error.message;
+  }
+}
+
+$('deliveryLive').onchange = () => {
+  // Reveal the address field the moment the pilot is switched on, so the
+  // one thing that save will demand is already in front of the person.
+  $('pilotField').hidden = $('deliveryLive').checked;
+};
+
+$('deliverySave').onclick = async () => {
+  const live = $('deliveryLive').checked;
+
+  const payload = { live, copyTo: $('copyTo').value.trim() };
+  if (!live) payload.redirectAllTo = $('pilotTo').value.trim();
+
+  try {
+    const saved = await api('/api/settings/delivery', {
+      method: 'PUT', body: JSON.stringify(payload)
+    });
+
+    paintDelivery(saved);
+    $('deliverySaved').textContent = 'נשמר. חל על הריצה הבאה.';
+  } catch (error) {
+    if (error.unauthorized) return openGate('הטוקן נדחה.');
+    $('err').hidden = false;
+    $('err').textContent = error.message;
+  }
+};
 
 const stored = readStored(KEY_TOKEN);
 
