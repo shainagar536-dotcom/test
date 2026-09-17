@@ -979,8 +979,38 @@ export function createApi({ db, config, fetchImpl }) {
   });
 
   route('GET', /^\/api\/dashboard\/recipients$/, async (_request, _params, url) => {
-    const rows = await db.listRecipients();
+    const stored = await db.listRecipients();
     const search = normalizeText(url.searchParams.get('search') ?? '');
+
+    // Sources the CRM knows about that have no row here at all.
+    //
+    // Listing only the stored rows made a new source in the CRM invisible on
+    // the one screen that is supposed to answer "who do we write to" — it is
+    // simply absent, which reads as "no such source" rather than as "nobody
+    // has given this one an address". That is the same silence that let a
+    // renamed source go unnoticed for eleven days, and it is the failure this
+    // page exists to prevent.
+    const known = new Set(stored.map(row => normalizeText(row.source_name)));
+
+    const missing = (await db.listSourceMap())
+      .filter(source => !known.has(normalizeText(source.name)))
+      .map(source => ({
+        source_key: source.name,
+        source_name: source.name,
+        email: '',
+        whatsapp: '',
+        channel: '',
+        leads: 0,
+        active: true,
+        updated_at: source.updated_at,
+
+        // Marks the row as coming from the CRM rather than from this table,
+        // so the page can say "new — needs an address" instead of showing it
+        // as a recipient that merely happens to be blank.
+        fromCrm: true
+      }));
+
+    const rows = [...missing, ...stored];
 
     const matching = search
       ? rows.filter(row => normalizeText(row.source_name).includes(search) ||
@@ -996,6 +1026,11 @@ export function createApi({ db, config, fetchImpl }) {
       // Real sources with real volume that nobody has an address for. These
       // are silent by necessity, not by decision, and worth seeing.
       noAddress: rows.filter(row => !row.channel).length,
+
+      // In the CRM, absent here. Counted separately because "we have not
+      // given this one an address yet" is a different job from "this one has
+      // a row whose address is blank".
+      newInCrm: missing.length,
 
       recipients: matching
     };

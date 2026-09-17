@@ -343,6 +343,12 @@
     width: 100%; padding: 9px 11px; border-radius: 8px;
     border: 1px solid var(--line); background: var(--panel); color: inherit;
   }
+
+  /* A CRM source with no row here yet: visible work, not a blank line. */
+  tr.isnew td { background: var(--open-bg); }
+  .newtag {
+    display: block; margin-top: 4px; font-size: 11px; color: var(--open);
+  }
 </style>
 </head>
 <body>
@@ -1260,15 +1266,22 @@ async function loadRecipients() {
       '<div class="t">בוואטסאפ</div></div>' +
     '<div class="card"><div class="n">' + n(data.noAddress) + '</div>' +
       '<div class="t">בלי כתובת</div>' +
-      '<div class="sub">אלה שקטים — לא בגלל החלטה</div></div>';
+      '<div class="sub">אלה שקטים — לא בגלל החלטה</div></div>' +
+    '<div class="card"><div class="n">' + n(data.newInCrm) + '</div>' +
+      '<div class="t">חדשים ב-CRM</div>' +
+      '<div class="sub">מופיעים ראשונים — מלא כתובת ושמור</div></div>';
 
   $('recipRows').innerHTML = data.recipients.map((r, i) => recipRow(r, i)).join('');
   wireRecipRows(data.recipients);
 }
 
 function recipRow(r, i) {
-  return '<tr class="editrow" data-i="' + i + '">' +
-    '<td><input data-field="sourceName" value="' + esc(r.source_name) + '"></td>' +
+  // A source the CRM has and this table does not. Marked rather than merely
+  // blank: "nobody has given this one an address yet" is a job, and a row
+  // that looks like every other one hides it.
+  return '<tr class="editrow' + (r.fromCrm ? ' isnew' : '') + '" data-i="' + i + '">' +
+    '<td><input data-field="sourceName" value="' + esc(r.source_name) + '">' +
+      (r.fromCrm ? '<span class="newtag">חדש ב-CRM — חסרה כתובת</span>' : '') + '</td>' +
     '<td><input data-field="email" class="ltr" value="' + esc(r.email ?? '') + '"></td>' +
     '<td><input data-field="whatsapp" class="ltr" value="' + esc(r.whatsapp ?? '') + '"></td>' +
     '<td><select data-field="channel">' +
@@ -1278,7 +1291,8 @@ function recipRow(r, i) {
       '</select></td>' +
     '<td>' + (r.leads ?? 0) + '</td>' +
     '<td><input type="checkbox" data-field="active"' + (r.active ? ' checked' : '') + '></td>' +
-    '<td><button data-del="' + esc(r.source_key ?? '') + '">מחיקה</button></td>' +
+    '<td>' + (r.fromCrm ? ''
+      : '<button data-del="' + esc(r.source_key ?? '') + '">מחיקה</button>') + '</td>' +
     '</tr>';
 }
 

@@ -1895,3 +1895,59 @@ test('the amount backfill leaves the resolved source alone', async () => {
   assert.equal(after.source_id, before.source_id);
   assert.equal(after.enrich_attempts, before.enrich_attempts);
 });
+
+// -------------------------------------- a source the CRM has and we do not
+
+test('a new source in the CRM appears on the recipients screen', async () => {
+  await db.upsertSources([{ id: 'new-1', name: 'סו"ב בני כהנא' }], 'crm');
+  await db.saveRecipient({
+    sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true
+  });
+
+  const body = await (await call('/api/dashboard/recipients')).json();
+
+  assert.equal(body.newInCrm, 1);
+
+  // First, because it is the row that needs doing.
+  const [first] = body.recipients;
+  assert.equal(first.source_name, 'סו"ב בני כהנא');
+  assert.equal(first.fromCrm, true);
+  assert.equal(first.email, '');
+
+  // The source that does have a recipient is not duplicated as "new".
+  assert.equal(body.recipients.filter(r => r.source_name === SOURCE_TITLE).length, 1);
+  assert.equal(body.recipients.find(r => r.source_name === SOURCE_TITLE).fromCrm, undefined);
+});
+
+test('giving the new source an address takes it off the new list', async () => {
+  await db.upsertSources([{ id: 'new-1', name: 'סו"ב בני כהנא' }], 'crm');
+
+  await call('/api/recipients', {
+    method: 'PUT',
+    body: JSON.stringify({ sourceName: 'סו"ב בני כהנא', email: 'benny@example.com' })
+  });
+
+  const body = await (await call('/api/dashboard/recipients')).json();
+
+  assert.equal(body.newInCrm, 0, 'it is a recipient now, not an open job');
+  assert.equal(body.recipients.length, 1);
+  assert.equal(body.recipients[0].email, 'benny@example.com');
+});
+
+test('a renamed source shows up as new, so the break is visible', async () => {
+  // The failure this screen exists to catch: the CRM renames a source, the
+  // old row stops matching anything, and nothing says so.
+  await db.saveRecipient({
+    sourceKey: 'מטאור - רועי כץ', sourceName: 'מטאור - רועי כץ',
+    email: 'roei@example.com', channel: 'email', active: true
+  });
+
+  await db.upsertSources([{ id: 'r1', name: 'סו"ב רועי כץ' }], 'crm');
+
+  const body = await (await call('/api/dashboard/recipients')).json();
+
+  assert.equal(body.newInCrm, 1);
+  assert.equal(body.recipients[0].source_name, 'סו"ב רועי כץ');
+  assert.equal(body.recipients[0].fromCrm, true);
+});
