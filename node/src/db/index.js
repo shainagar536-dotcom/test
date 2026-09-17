@@ -722,6 +722,28 @@ export class Database {
     return new Map(rows.map(row => [row.source_id, row.name]));
   }
 
+  /**
+   * How many distinct leads each source has actually been seen referring.
+   *
+   * The seeded counts came from the CRM's lead table on the day of the first
+   * import and have been frozen ever since, so the column claimed to be a
+   * fact about the CRM while slowly becoming a fact about nothing. Counted
+   * here from the log instead: it is smaller, but it is true, and it means
+   * one thing — leads this source referred whose status has moved since the
+   * service started listening.
+   *
+   * @returns {Promise<Map<string, number>>}  source name -> leads
+   */
+  async leadsSeenBySource() {
+    const { rows } = await this.pool.query(
+      `SELECT source_name, count(DISTINCT lead_id)::int AS leads
+         FROM status_events
+        WHERE coalesce(source_name, '') <> ''
+        GROUP BY source_name`);
+
+    return new Map(rows.map(row => [row.source_name, row.leads]));
+  }
+
   /** @returns {Promise<Array<object>>} */
   async listSourceMap() {
     const { rows } = await this.pool.query(

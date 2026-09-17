@@ -809,7 +809,11 @@ test('a source with no address is kept, silent and visible', async () => {
 
   const campaign = body.recipients.find(r => r.source_name === 'קמפיין');
   assert.equal(campaign.channel, '');
-  assert.equal(campaign.leads, 485);
+
+  // The seed carries 485 for this one, from the CRM on import day. The
+  // screen does not repeat it: nothing has moved through the log yet, and a
+  // number that describes a day months gone is worse than an honest zero.
+  assert.equal(campaign.leads, 0);
 });
 
 test('the policy tab reports wording that contradicts the muted list', async () => {
@@ -1950,4 +1954,39 @@ test('a renamed source shows up as new, so the break is visible', async () => {
   assert.equal(body.newInCrm, 1);
   assert.equal(body.recipients[0].source_name, 'סו"ב רועי כץ');
   assert.equal(body.recipients[0].fromCrm, true);
+});
+
+test('the lead count is what the log has seen, not a frozen import number', async () => {
+  // The row carries a count from import day. It must not be believed.
+  await db.saveRecipient({
+    sourceKey: SOURCE_TITLE, sourceName: SOURCE_TITLE,
+    email: 'roi@example.com', channel: 'email', active: true, leads: 25
+  });
+
+  for (const lead of ['a', 'b', 'a']) {
+    await db.recordStatusEvent({
+      leadId: lead, customerName: 'x', statusBefore: 'חדש', statusAfter: 'לא ענה',
+      sourceName: SOURCE_TITLE, sourceState: 'resolved',
+      occurredAt: '2026-09-06T13:00:00Z'
+    });
+  }
+
+  const body = await (await call('/api/dashboard/recipients')).json();
+  const row = body.recipients.find(r => r.source_name === SOURCE_TITLE);
+
+  // Two distinct leads, three events. Not the 25 the row was seeded with.
+  assert.equal(row.leads, 2);
+});
+
+test('a CRM source nothing has moved for reads zero, and that is the truth', async () => {
+  await db.upsertSources([{ id: 'a1', name: 'מטאור - אנטון אוסטנובסקי' }], 'crm');
+
+  const body = await (await call('/api/dashboard/recipients')).json();
+  const row = body.recipients.find(r => r.source_name === 'מטאור - אנטון אוסטנובסקי');
+
+  // He has leads in the CRM. None of them has changed status since the
+  // service started listening, so the log has nothing — and the column says
+  // what the log knows rather than guessing at the CRM.
+  assert.equal(row.leads, 0);
+  assert.equal(row.fromCrm, true);
 });

@@ -992,6 +992,14 @@ export function createApi({ db, config, fetchImpl }) {
     // page exists to prevent.
     const known = new Set(stored.map(row => normalizeText(row.source_name)));
 
+    // Counted from the log rather than taken from the row: the stored number
+    // was the CRM's lead count on import day and has been frozen since, so it
+    // read as a live fact while describing a moment months gone. This one is
+    // smaller and true, and it means the same thing on every row — including
+    // the ones the CRM has that this table does not.
+    const seen = await db.leadsSeenBySource();
+    const leadsFor = name => seen.get(name) ?? 0;
+
     const missing = (await db.listSourceMap())
       .filter(source => !known.has(normalizeText(source.name)))
       .map(source => ({
@@ -1000,7 +1008,7 @@ export function createApi({ db, config, fetchImpl }) {
         email: '',
         whatsapp: '',
         channel: '',
-        leads: 0,
+        leads: leadsFor(source.name),
         active: true,
         updated_at: source.updated_at,
 
@@ -1010,7 +1018,8 @@ export function createApi({ db, config, fetchImpl }) {
         fromCrm: true
       }));
 
-    const rows = [...missing, ...stored];
+    const rows = [...missing,
+      ...stored.map(row => ({ ...row, leads: leadsFor(row.source_name) }))];
 
     const matching = search
       ? rows.filter(row => normalizeText(row.source_name).includes(search) ||
