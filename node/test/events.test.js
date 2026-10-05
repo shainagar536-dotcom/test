@@ -2228,3 +2228,15 @@ test('a refused key is named as such, and not retried into a rate limit', async 
   await assert.rejects(() => make().authenticate(), /waiting \d+s/);
   assert.equal(calls, 1);
 });
+
+test('"try it now" clears the cool-off, so a fixed key can be tested at once',
+  async () => {
+    await db.setCrmCooldown(new Date(Date.now() + 30 * 60 * 1000));
+    assert.ok(await db.crmCooldown(), 'something is holding calls back');
+
+    // The guard that stops a refused key being retried must not also stop
+    // somebody checking the key they have just replaced.
+    await call('/api/crm?now=true', { method: 'POST' });
+
+    assert.equal(await db.crmCooldown(), null);
+  });

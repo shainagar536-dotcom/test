@@ -1099,7 +1099,13 @@ export function createApi({ db, config, fetchImpl }) {
     note: 'POST here to authenticate and confirm these actually work.'
   }));
 
-  route('POST', /^\/api\/crm$/, async () => {
+  route('POST', /^\/api\/crm$/, async (_request, _params, url) => {
+    // "I have just changed the key, try it now." Without this the cool-off
+    // that protects a refused key from being retried would also block the
+    // fix for it — the person updates the credentials, nothing happens for
+    // half an hour, and they reasonably conclude it did not work.
+    if (url.searchParams.get('now') === 'true') await db.setCrmCooldown(null);
+
     const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const settings = crmSettings(config);
 
