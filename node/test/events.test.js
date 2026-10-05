@@ -2134,3 +2134,63 @@ test('marking a row by hand is not a send, and must not reset the alarm', async 
   // the clock on an outage that is still running.
   assert.equal(body.lastSentAt, null);
 });
+
+// ------------------------------------------- honouring "retry later"
+
+test('a 429 with Retry-After stops every later call until it expires', async () => {
+  const { SurenseClient } = await import('../src/surense.js');
+
+  let tokenRequests = 0;
+  const fetchImpl = async () => {
+    tokenRequests++;
+    return {
+      ok: false,
+      status: 429,
+      headers: { get: (name) => (name === 'retry-after' ? '1914' : null) },
+      text: async () => '{"error":"too_many_requests"}'
+    };
+  };
+
+  const cooldown = {
+    read: () => db.crmCooldown(),
+    write: (until) => db.setCrmCooldown(until)
+  };
+
+  const make = () => new SurenseClient({
+    clientId: 'c', clientSecret: 's', tokenUrl: 'https://crm.test/oauth/token',
+    apiBases: ['https://crm.test/api/v1'], fetchImpl, cooldown
+  });
+
+  await assert.rejects(() => make().authenticate(), /429/);
+  assert.equal(tokenRequests, 1);
+
+  // A second client — as the next request would build — asks again and is
+  // refused without a call. On a rolling window, asking is what renews it.
+  await assert.rejects(() => make().authenticate(), /waiting \d+s as the CRM asked/);
+  assert.equal(tokenRequests, 1, 'the CRM was not touched a second time');
+
+  const until = await db.crmCooldown();
+  assert.ok(until > new Date(), 'the deadline is in force');
+  assert.ok((until - Date.now()) / 1000 > 1800, 'and it is the one the CRM gave');
+});
+
+test('a token that goes through clears the deadline', async () => {
+  const { SurenseClient } = await import('../src/surense.js');
+
+  await db.setCrmCooldown(new Date(Date.now() - 1000));   // expired
+
+  const client = new SurenseClient({
+    clientId: 'c', clientSecret: 's', tokenUrl: 'https://crm.test/oauth/token',
+    apiBases: ['https://crm.test/api/v1'],
+    fetchImpl: async () => ({
+      ok: true, status: 200, headers: { get: () => null },
+      text: async () => JSON.stringify({ access_token: 't', expires_in: 3600 })
+    }),
+    cooldown: { read: () => db.crmCooldown(), write: (u) => db.setCrmCooldown(u) }
+  });
+
+  const { token } = await client.authenticate();
+
+  assert.equal(token, 't');
+  assert.equal(await db.crmCooldown(), null, 'nothing is holding anyone back');
+});

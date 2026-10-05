@@ -38,7 +38,13 @@ async function execute({ db, config, trigger, fetchImpl }) {
   const startedAt = new Date();
   const runId = await db.startRun({ trigger, startedAt });
 
-  const client = new SurenseClient({ ...config.surense, fetchImpl });
+  // Same shared cool-off as every other caller: a sync that ignored it would
+  // reset the window for the sender too.
+  const client = new SurenseClient({
+    ...config.surense,
+    fetchImpl,
+    cooldown: { read: () => db.crmCooldown(), write: (until) => db.setCrmCooldown(until) }
+  });
 
   try {
     const { scope } = await client.authenticate();

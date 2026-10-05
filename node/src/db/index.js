@@ -27,6 +27,9 @@ pg.types.setTypeParser(20, value => Number(value));
  */
 const DELIVERY_KEYS = new Set(['redirectAllTo', 'copyTo', 'totalColumn']);
 
+/** Where the CRM's own "retry later" deadline is kept. */
+const CRM_COOLDOWN_KEY = 'crmCooldownUntil';
+
 export class Database {
   /** @param {{url: string, ssl: object|false, maxConnections: number}} options */
   constructor({ url, ssl, maxConnections }) {
@@ -1164,6 +1167,33 @@ export class Database {
       lastSentAt: row.last_sent_at ? new Date(row.last_sent_at).toISOString() : null,
       waiting: row.waiting
     };
+  }
+
+  /**
+   * Until when the CRM has asked to be left alone, if it has.
+   *
+   * Stored rather than remembered: a client is built per request, so an
+   * in-memory note would be forgotten by the next caller and the deadline
+   * would bind nobody. This is the shared one.
+   *
+   * @returns {Promise<?Date>}
+   */
+  async crmCooldown() {
+    const { rows } = await this.pool.query(
+      'SELECT value FROM settings WHERE key = $1', [CRM_COOLDOWN_KEY]);
+
+    const until = rows[0]?.value ? new Date(rows[0].value) : null;
+
+    return until && until > new Date() ? until : null;
+  }
+
+  /** @param {?Date} until */
+  async setCrmCooldown(until) {
+    await this.pool.query(
+      `INSERT INTO settings (key, value)
+       VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [CRM_COOLDOWN_KEY, until ? until.toISOString() : '']);
   }
 
   async exhaustedCount(maxAttempts = 5) {

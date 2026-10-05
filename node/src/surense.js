@@ -76,13 +76,21 @@ export class SurenseClient {
    */
   constructor({
     clientId, clientSecret, tokenUrl, apiBases,
-    pageSize = 50, maxPages = 400, fetchImpl = globalThis.fetch
+    pageSize = 50, maxPages = 400, fetchImpl = globalThis.fetch,
+
+    // The shared record of a "retry later" the CRM has already given us.
+    // Shared because a client is built per request: a deadline kept in this
+    // object would bind only the caller who was told, and the next request a
+    // second later would ask again — which is exactly how a half-hour cool-
+    // off was kept alive for eight days.
+    cooldown = null
   }) {
     Object.assign(this, {
       clientId, clientSecret, tokenUrl, apiBases, pageSize, maxPages
     });
 
     this.fetch = fetchImpl;
+    this.cooldown = cooldown;
     this.token = null;
     this.tokenExpiresAt = 0;
     this.base = null;
@@ -97,6 +105,19 @@ export class SurenseClient {
   async authenticate() {
     if (this.token && Date.now() < this.tokenExpiresAt) {
       return { token: this.token, scope: this.scope };
+    }
+
+    // The CRM has already said when to come back. Asking before then is not
+    // a retry — it is the request it asked us not to make, and on a rolling
+    // window it pushes the deadline out again. So this fails without a call.
+    const until = await this.cooldown?.read?.();
+
+    if (until && new Date(until) > new Date()) {
+      const seconds = Math.ceil((new Date(until) - Date.now()) / 1000);
+
+      throw new SurenseError(
+        `Token request failed (HTTP 429) — waiting ${seconds}s as the CRM asked`,
+        { status: 429, retryAfter: seconds, hint: 'rate limited — the cool-off is being honoured' });
     }
 
     // This endpoint rejects JSON; it requires form encoding.
@@ -119,6 +140,11 @@ export class SurenseClient {
       // asking somebody.
       const retryAfter = response.headers?.get?.('retry-after') ?? null;
 
+      // Written down so every later caller honours it too, not only this one.
+      if (response.status === 429 && Number(retryAfter) > 0) {
+        await this.cooldown?.write?.(new Date(Date.now() + Number(retryAfter) * 1000));
+      }
+
       throw new SurenseError(`Token request failed (HTTP ${response.status})`, {
         status: response.status, body, retryAfter, hint: hintFor(response.status)
       });
@@ -134,6 +160,9 @@ export class SurenseClient {
     if (!parsed.access_token) {
       throw new SurenseError('The token response contained no access_token.', { body });
     }
+
+    // Through: whatever deadline was standing no longer applies.
+    await this.cooldown?.write?.(null);
 
     this.token = parsed.access_token;
     this.scope = parsed.scope ?? '';

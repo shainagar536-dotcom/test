@@ -164,6 +164,15 @@ export function createApi({ db, config, fetchImpl }) {
    * Read per request, not cached: the whole point is that throwing the
    * switch on the screen takes effect on the next run, with no redeploy.
    */
+  // The CRM's own "retry later", shared by every client this process builds.
+  // Without a shared record each request asks again the moment it is told to
+  // wait, and on a rolling window that keeps a half-hour cool-off alive
+  // indefinitely — which it did, for eight days.
+  const cooldown = {
+    read: () => db.crmCooldown(),
+    write: (until) => db.setCrmCooldown(until)
+  };
+
   const messagingNow = async () => {
     const stored = await db.deliverySettings();
 
@@ -570,7 +579,7 @@ export function createApi({ db, config, fetchImpl }) {
         error: 'No leads stored yet. Run POST /api/sync first.' } };
     }
 
-    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const candidates = [];
 
     // The cheapest candidate first: the field schema is already read on every
@@ -684,7 +693,7 @@ export function createApi({ db, config, fetchImpl }) {
   // Looks up the source for events that arrived without one. Safe to call
   // repeatedly and safe to schedule: it only touches rows still waiting.
   route('POST', /^\/api\/events\/enrich$/, async (_request, _params, url) => {
-    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const limit = Number(url.searchParams.get('limit') ?? 25);
     const effective = await configNow();
 
@@ -818,7 +827,7 @@ export function createApi({ db, config, fetchImpl }) {
   // Reloads the whole id -> name catalog in one call. This is the endpoint
   // that fills in every source name at once.
   route('POST', /^\/api\/sources\/refresh$/, async () => {
-    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
 
     const result = await refreshSourceCatalog({
       db, client, path: config.sourceCatalogPath
@@ -1091,7 +1100,7 @@ export function createApi({ db, config, fetchImpl }) {
   }));
 
   route('POST', /^\/api\/crm$/, async () => {
-    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const settings = crmSettings(config);
 
     let auth;
@@ -1179,7 +1188,7 @@ export function createApi({ db, config, fetchImpl }) {
   //
   // Read-only, and one lead at a time: it is a question, not a sync.
   route('GET', /^\/api\/crm\/lead\/([^/]+)$/, async (_request, params) => {
-    const client = new SurenseClient({ ...config.surense, fetchImpl });
+    const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const leadId = decodeURIComponent(params[0]);
 
     let lead;
@@ -1816,7 +1825,7 @@ export function createApi({ db, config, fetchImpl }) {
         db,
         payload,
         config,
-        client: new SurenseClient({ ...config.surense, fetchImpl })
+        client: new SurenseClient({ ...config.surense, fetchImpl, cooldown })
       });
     } catch (error) {
       // The delivery is stored either way, so it can be replayed once the
