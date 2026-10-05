@@ -1140,6 +1140,32 @@ export class Database {
    * @param {number} [maxAttempts]
    * @returns {Promise<number>}
    */
+  /**
+   * When anything was last actually sent, and how much is waiting.
+   *
+   * The one pair of numbers that catches a failure nobody predicted. Every
+   * alarm until now needed the code to recognise a specific fault — a 429, a
+   * dead host — and the fault that actually happened was recognised by
+   * nothing, so the service sat silent for eight days while the queue grew by
+   * a thousand. "Nothing has gone out since the 27th and 1,333 are waiting"
+   * needs no theory about why.
+   *
+   * @returns {Promise<{lastSentAt: ?string, waiting: number}>}
+   */
+  async sendingPulse() {
+    const { rows: [row] } = await this.pool.query(
+      `SELECT max(notified_at) FILTER (
+                WHERE notified_via NOT IN ('manual', 'skipped')
+              ) AS last_sent_at,
+              count(*) FILTER (WHERE notified_at IS NULL)::int AS waiting
+         FROM status_events`);
+
+    return {
+      lastSentAt: row.last_sent_at ? new Date(row.last_sent_at).toISOString() : null,
+      waiting: row.waiting
+    };
+  }
+
   async exhaustedCount(maxAttempts = 5) {
     const { rows: [{ count }] } = await this.pool.query(
       `SELECT count(*)::int AS count

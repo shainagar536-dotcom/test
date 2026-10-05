@@ -2091,3 +2091,46 @@ test('reviving never touches an event that was already sent', async () => {
 
   assert.equal(await db.reviveExhausted(), 0, 'its message is gone either way');
 });
+
+// ------------------------------------------ the alarm that needs no theory
+
+test('the outbox says when something last really went out, and how much waits',
+  async () => {
+    const { id } = await db.recordStatusEvent({
+      leadId: 'lead-1', customerName: 'x', statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: '2026-10-01T09:00:00Z'
+    });
+
+    for (const lead of ['lead-2', 'lead-3']) {
+      await db.recordStatusEvent({
+        leadId: lead, customerName: 'y', statusBefore: 'חדש',
+        statusAfter: 'לא ענה', occurredAt: '2026-10-02T09:00:00Z'
+      });
+    }
+
+    const before = await (await call('/api/outbox')).json();
+    assert.equal(before.lastSentAt, null, 'nothing has ever gone out');
+    assert.equal(before.waiting, 3);
+
+    await db.markEventsNotified([id], 'email', 'a@b.c');
+
+    const after = await (await call('/api/outbox')).json();
+    assert.ok(after.lastSentAt, 'a real send sets the clock');
+    assert.equal(after.waiting, 2);
+  });
+
+test('marking a row by hand is not a send, and must not reset the alarm', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: 'lead-1', customerName: 'x', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-10-01T09:00:00Z'
+  });
+
+  await db.markEventsHandled([id], 'skipped', 'לא לשלוח');
+
+  const body = await (await call('/api/outbox')).json();
+
+  // Somebody deciding not to send one row says nothing about whether the
+  // service can still send at all — and counting it would quietly restart
+  // the clock on an outage that is still running.
+  assert.equal(body.lastSentAt, null);
+});

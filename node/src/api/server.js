@@ -336,6 +336,12 @@ export function createApi({ db, config, fetchImpl }) {
       // looks, since nowhere else would have shown them at all.
       stuck: await db.exhaustedCount(),
 
+      // The alarm that needs no theory about the fault. Every other check
+      // here recognises a specific failure, and the one that actually
+      // happened was recognised by none of them — so this says only when
+      // something last really went out and how much is waiting behind it.
+      ...await db.sendingPulse(),
+
       skipped: summarizeSkips(skipped),
       messages: ready
     };
