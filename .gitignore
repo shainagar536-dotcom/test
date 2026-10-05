@@ -6,3 +6,4 @@ demo*.csv
 leads.csv
 leads.csv.bak
 leads-changes.csv
+.claude/settings.local.json
