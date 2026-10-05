@@ -520,6 +520,16 @@
       </div>
     </div>
 
+    <div class="field">
+      <label for="credExpires">מתי פג המפתח של ה-CRM</label>
+      <input type="date" id="credExpires">
+      <div class="switchsub" id="credHint">
+        ה-CRM מציג את התאריך פעם אחת, כשיוצרים את המפתח, ואחר כך הוא נעלם.
+        כשהוא פג — <b>הכל נעצר בשקט</b>. רשום אותו כאן והמערכת תזהיר שבועיים מראש,
+        בכל ריצה, עד שתחליף.
+      </div>
+    </div>
+
     <div class="bar" style="border:0;padding:0;margin-top:16px">
       <button class="primary" id="deliverySave">שמור</button>
       <span id="deliverySaved" class="card-sub" style="color:var(--muted)"></span>
@@ -1389,6 +1399,30 @@ function paintDelivery(data) {
   $('pilotTo').value = data.redirectAllTo || '';
   $('copyTo').value = data.copyTo || '';
   $('totalColumn').value = data.totalColumn || '';
+  $('credExpires').value = (data.credentialExpiresAt || '').slice(0, 10);
+
+  // Said in days, not only as a date: "פג בעוד 9 ימים" is a thing to act on,
+  // a date in January is a thing to forget.
+  const left = data.credentialDaysLeft;
+  const hint = $('credHint');
+
+  if (left === null || left === undefined) {
+    hint.style.color = '';
+    hint.innerHTML = 'ה-CRM מציג את התאריך פעם אחת, כשיוצרים את המפתח, ואחר כך ' +
+      'הוא נעלם. כשהוא פג — <b>הכל נעצר בשקט</b>. רשום אותו כאן והמערכת תזהיר ' +
+      'שבועיים מראש, בכל ריצה, עד שתחליף.';
+  } else if (left < 0) {
+    hint.style.color = 'var(--none)';
+    hint.innerHTML = '<b>המפתח פג לפני ' + Math.abs(left) + ' ימים.</b> ' +
+      'כל עוד לא הוחלף, שום הודעה לא יוצאת.';
+  } else if (left <= 14) {
+    hint.style.color = 'var(--open)';
+    hint.innerHTML = '<b>פג בעוד ' + left + ' ימים.</b> תייצר מפתח חדש ב-Surense ' +
+      'ותעדכן ב-Render, לפני שזה נעצר.';
+  } else {
+    hint.style.color = 'var(--sent)';
+    hint.textContent = 'תקף עוד ' + left + ' ימים. המערכת תזהיר שבועיים לפני.';
+  }
   $('pilotField').hidden = data.live;
 
   const box = $('deliveryState');
@@ -1432,7 +1466,8 @@ $('deliverySave').onclick = async () => {
   const payload = {
     live,
     copyTo: $('copyTo').value.trim(),
-    totalColumn: $('totalColumn').value.trim()
+    totalColumn: $('totalColumn').value.trim(),
+    credentialExpiresAt: $('credExpires').value.trim()
   };
   if (!live) payload.redirectAllTo = $('pilotTo').value.trim();
 

@@ -2240,3 +2240,61 @@ test('"try it now" clears the cool-off, so a fixed key can be tested at once',
 
     assert.equal(await db.crmCooldown(), null);
   });
+
+// ------------------------------------------- the key's own expiry date
+
+test('the key expiry is stored and counted down in days', async () => {
+  const in20 = new Date(Date.now() + 20 * 86400000).toISOString().slice(0, 10);
+
+  const saved = await (await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ credentialExpiresAt: in20 })
+  })).json();
+
+  // Days, not a date. "Expires in 20 days" is something to act on; a date in
+  // January is something to forget — which is exactly what happened.
+  assert.ok(saved.credentialDaysLeft >= 19 && saved.credentialDaysLeft <= 21,
+    `got ${saved.credentialDaysLeft}`);
+
+  const body = await (await call('/api/settings/delivery')).json();
+  assert.equal(body.credentialExpiresAt.slice(0, 10), in20);
+  assert.equal(body.source.credentialExpiresAt, 'dashboard');
+});
+
+test('the countdown rides on the outbox, where the hourly run already looks',
+  async () => {
+    const soon = new Date(Date.now() + 9 * 86400000).toISOString().slice(0, 10);
+    await db.saveDeliverySettings({ credentialExpiresAt: soon });
+
+    const outbox = await (await call('/api/outbox')).json();
+
+    // The last key expired unnoticed because nothing said so unless somebody
+    // opened a page. This number travels with every run instead.
+    assert.ok(outbox.credentialDaysLeft >= 8 && outbox.credentialDaysLeft <= 10,
+      `got ${outbox.credentialDaysLeft}`);
+  });
+
+test('a key that already expired counts in negative, not in silence', async () => {
+  const gone = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+  await db.saveDeliverySettings({ credentialExpiresAt: gone });
+
+  const body = await (await call('/api/outbox')).json();
+
+  assert.ok(body.credentialDaysLeft < 0, `got ${body.credentialDaysLeft}`);
+});
+
+test('no date stored reads as unknown, which is not the same as fine', async () => {
+  const body = await (await call('/api/outbox')).json();
+
+  // Null rather than a large number: nobody has said when this key dies, and
+  // claiming it is far away would be an invention.
+  assert.equal(body.credentialDaysLeft, null);
+});
+
+test('a date that is not a date is refused rather than stored', async () => {
+  const bad = await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ credentialExpiresAt: 'בקרוב' })
+  });
+
+  assert.equal(bad.status, 400);
+  assert.equal((await (await call('/api/outbox')).json()).credentialDaysLeft, null);
+});

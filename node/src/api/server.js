@@ -173,6 +173,29 @@ export function createApi({ db, config, fetchImpl }) {
     write: (until) => db.setCrmCooldown(until)
   };
 
+  /**
+   * How long the CRM key has left, from the date somebody wrote down.
+   *
+   * The CRM shows the expiry once, when the key is made, and never again —
+   * so nothing can read it back and the only way to know is to have been
+   * told. A key that quietly expired cost eight days of silence, and the
+   * whole point of keeping the date is to say it before the day, not after.
+   *
+   * Null when no date is stored: unknown is not the same as fine, and the
+   * caller says so in those words.
+   */
+  const credentialDaysLeft = async () => {
+    const { credentialExpiresAt } = await db.deliverySettings();
+    if (!credentialExpiresAt) return null;
+
+    const until = new Date(credentialExpiresAt);
+    if (Number.isNaN(until.getTime())) return null;
+
+    // Whole days, rounded up: with eighteen hours to go the honest answer is
+    // "tomorrow", not "zero days".
+    return Math.ceil((until - Date.now()) / 86400000);
+  };
+
   const messagingNow = async () => {
     const stored = await db.deliverySettings();
 
@@ -350,6 +373,12 @@ export function createApi({ db, config, fetchImpl }) {
       // happened was recognised by none of them — so this says only when
       // something last really went out and how much is waiting behind it.
       ...await db.sendingPulse(),
+
+      // Days until the CRM key stops working, or null if nobody wrote the
+      // date down. Carried here, where the sender already looks every hour,
+      // because a warning that only appears when somebody opens a page is
+      // the same silence that let the last key expire unnoticed.
+      credentialDaysLeft: await credentialDaysLeft(),
 
       skipped: summarizeSkips(skipped),
       messages: ready
@@ -1341,6 +1370,12 @@ export function createApi({ db, config, fetchImpl }) {
       // both are reasons a partner does not hear from us.
       totalColumn: effective.columns.total || '',
 
+      // The day the CRM key dies, and how long that is. On this screen for
+      // the same reason as the rest: every field here is a way the partners
+      // stop hearing from us.
+      credentialExpiresAt: stored.credentialExpiresAt || '',
+      credentialDaysLeft: await credentialDaysLeft(),
+
       // Whether a message reaches its source at all — the plain-language
       // form of the same fact, because "redirectAllTo is set" is not how
       // anyone thinks about it.
@@ -1351,7 +1386,8 @@ export function createApi({ db, config, fetchImpl }) {
       source: {
         redirectAllTo: 'redirectAllTo' in stored ? 'dashboard' : 'environment',
         copyTo: 'copyTo' in stored ? 'dashboard' : 'environment',
-        totalColumn: 'totalColumn' in stored ? 'dashboard' : 'environment'
+        totalColumn: 'totalColumn' in stored ? 'dashboard' : 'environment',
+        credentialExpiresAt: 'credentialExpiresAt' in stored ? 'dashboard' : 'unset'
       }
     };
   });
@@ -1387,6 +1423,18 @@ export function createApi({ db, config, fetchImpl }) {
     // id. Empty is meaningful: it holds the messages that quote an amount.
     if ('totalColumn' in body) patch.totalColumn = String(body.totalColumn ?? '').trim();
 
+    // A date, as YYYY-MM-DD. Empty clears it.
+    if ('credentialExpiresAt' in body) {
+      const when = String(body.credentialExpiresAt ?? '').trim();
+
+      if (when && Number.isNaN(new Date(when).getTime())) {
+        return { status: 400, body: { error:
+          'credentialExpiresAt must be a date, e.g. 2027-01-03.' } };
+      }
+
+      patch.credentialExpiresAt = when;
+    }
+
     for (const key of ['redirectAllTo', 'copyTo']) {
       if (patch[key] && !patch[key].includes('@')) {
         return { status: 400, body: { error: `${key} must be an email address.` } };
@@ -1395,7 +1443,8 @@ export function createApi({ db, config, fetchImpl }) {
 
     if (!Object.keys(patch).length) {
       return { status: 400, body: { error:
-        'Nothing to change. Send live, redirectAllTo, copyTo or totalColumn.' } };
+        'Nothing to change. Send live, redirectAllTo, copyTo, totalColumn ' +
+      'or credentialExpiresAt.' } };
     }
 
     await db.saveDeliverySettings(patch);
@@ -1407,6 +1456,7 @@ export function createApi({ db, config, fetchImpl }) {
       redirectAllTo: effective.redirectAllTo || '',
       copyTo: effective.copyTo || '',
       totalColumn: effective.columns.total || '',
+      credentialDaysLeft: await credentialDaysLeft(),
       live: !effective.redirectAllTo
     };
   });

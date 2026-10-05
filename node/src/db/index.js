@@ -25,7 +25,15 @@ pg.types.setTypeParser(20, value => Number(value));
  * endpoint, and without this an unexpected key would be stored and silently
  * ignored, which reads as a saved setting that does nothing.
  */
-const DELIVERY_KEYS = new Set(['redirectAllTo', 'copyTo', 'totalColumn']);
+const DELIVERY_KEYS = new Set([
+  'redirectAllTo', 'copyTo', 'totalColumn',
+
+  // The day the CRM key stops working. The CRM does not tell us — the date
+  // is shown once, when the key is created, and then only to whoever made it.
+  // Kept here so the service can say it out loud before the day arrives
+  // rather than discovering it as an outage.
+  'credentialExpiresAt'
+]);
 
 /** Where the CRM's own "retry later" deadline is kept. */
 const CRM_COOLDOWN_KEY = 'crmCooldownUntil';
