@@ -33,6 +33,35 @@ function hintFor(status) {
   }[status] ?? '';
 }
 
+/**
+ * Whether a failure is about the CRM rather than about the row we asked for.
+ *
+ * The distinction decides whether retrying is worth anything. "This lead id
+ * is unknown" is about one event and another attempt may answer differently.
+ * "The token endpoint is refusing us" is about every event equally, and
+ * trying the next twenty-four is not a retry — it is the same request twenty-
+ * four more times, against a service that has just said it is receiving too
+ * many.
+ *
+ * @param {?Error} error
+ * @returns {boolean}
+ */
+export function isOutage(error) {
+  if (!error) return false;
+
+  const status = Number(error.status ?? 0);
+
+  // 429 and 5xx are the service saying so itself. 401/403 mean the
+  // credentials are wrong, which no amount of retrying per-event will fix.
+  if (status === 429 || status === 408 || status >= 500) return true;
+  if (status === 401 || status === 403) return true;
+
+  // fetchLeadById joins its attempts' messages into one error and loses the
+  // status, so the text is the only thing left to read.
+  return /No API base answered|Token request failed|token response|fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|timed? ?out/i
+    .test(String(error.message ?? ''));
+}
+
 export class SurenseClient {
   /**
    * @param {object} options

@@ -1129,6 +1129,56 @@ export class Database {
     return rows;
   }
 
+  /**
+   * How many unsent events have spent every retry they are allowed.
+   *
+   * These are invisible otherwise: they are not pending, nothing is going to
+   * pick them up again, and they look exactly like events that simply have
+   * nothing to say. Three hundred of them accumulated during one CRM outage
+   * without a single number anywhere going up.
+   *
+   * @param {number} [maxAttempts]
+   * @returns {Promise<number>}
+   */
+  async exhaustedCount(maxAttempts = 5) {
+    const { rows: [{ count }] } = await this.pool.query(
+      `SELECT count(*)::int AS count
+         FROM status_events
+        WHERE source_state <> 'resolved'
+          AND notified_at IS NULL
+          AND enrich_attempts >= $1`,
+      [maxAttempts]);
+
+    return count;
+  }
+
+  /**
+   * Gives exhausted events their attempts back.
+   *
+   * A retry cap is right for a lead the CRM genuinely cannot answer for, and
+   * wrong for every event that happened to be in the queue while the CRM was
+   * unreachable — the cap was spent on a failure that was never about them.
+   * Explicit rather than automatic: it is a decision that something has
+   * changed, and the code cannot know that on its own.
+   *
+   * Sent events are untouched: their message is gone and no lookup changes it.
+   *
+   * @param {number} [maxAttempts]
+   * @returns {Promise<number>}  rows revived
+   */
+  async reviveExhausted(maxAttempts = 5) {
+    const { rowCount } = await this.pool.query(
+      `UPDATE status_events
+          SET enrich_attempts = 0,
+              source_state = 'pending'
+        WHERE source_state <> 'resolved'
+          AND notified_at IS NULL
+          AND enrich_attempts >= $1`,
+      [maxAttempts]);
+
+    return rowCount;
+  }
+
   async pendingEnrichment({ limit = 25, maxAttempts = 5 } = {}) {
     const { rows } = await this.pool.query(
       `SELECT * FROM status_events

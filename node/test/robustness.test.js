@@ -177,11 +177,16 @@ test('a CRM that is down costs the lookup, never the event', async () => {
 
   const body = await response.json();
   assert.equal(body.recorded, true);
-  assert.equal(body.source.state, 'failed');
+
+  // Pending, not failed. "Failed" is a verdict about this lead, and a CRM
+  // that answers nobody has not reached one — recording it as failed is what
+  // charges the event for somebody else's outage.
+  assert.equal(body.source.state, 'pending');
 
   // The row is complete apart from the lookup, and the retry pass owns it.
   const [event] = await db.listStatusEvents({});
   assert.equal(event.customer_name, 'רועי');
+  assert.equal(event.enrich_attempts, 0, 'the outage cost it nothing');
   assert.equal((await db.pendingEnrichment({})).length, 1);
 });
 
@@ -196,10 +201,18 @@ test('the enrichment pass reports a dead CRM rather than throwing', async () => 
   });
 
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).failed, 1);
+
+  const body = await response.json();
+
+  // A CRM that is not there is reported as an outage, not as a failed row.
+  // The difference is who has to act: a failed row is a question about that
+  // lead, an outage is a question for whoever runs the CRM — and the service
+  // once spent eight days looking like the first while being the second.
+  assert.match(body.outage, /ECONNREFUSED/);
+  assert.equal(body.failed, 0);
 });
 
-test('a hopeless event is retried a bounded number of times, then left', async () => {
+test('an outage does not spend the attempts meant for a broken lead', async () => {
   await send({
     eventType: 'LeadUpdated', leadId: 'lead-5', date: '2026-09-06T13:25:41Z',
     diff: { statusName: { before: 'חדש', after: 'לא ענה' } }
@@ -211,12 +224,18 @@ test('a hopeless event is retried a bounded number of times, then left', async (
     });
   }
 
-  // It stops being picked up, so one broken lead cannot crowd out the queue.
-  assert.equal((await db.pendingEnrichment({})).length, 0);
-
   const [event] = await db.listStatusEvents({});
-  assert.ok(event.enrich_attempts <= 6, `attempts: ${event.enrich_attempts}`);
-  assert.equal(event.source_state, 'failed');
+
+  // Ten passes against a CRM that is not there, and the event is untouched.
+  // The retry cap exists for a lead the CRM cannot answer for; spending it on
+  // a CRM that answers nobody retires the event for a reason that was never
+  // about it. That is how three hundred notifications went quiet during one
+  // outage, with nothing anywhere to show it.
+  assert.equal(event.enrich_attempts, 0);
+  assert.equal(event.source_state, 'pending');
+
+  // So it is still in the queue, waiting for the CRM rather than for a person.
+  assert.equal((await db.pendingEnrichment({})).length, 1);
 });
 
 test('an unknown event type is stored with its reason, not dropped', async () => {

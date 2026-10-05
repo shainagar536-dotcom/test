@@ -12,6 +12,7 @@
  */
 
 import { resolveSourceName } from '../sources.js';
+import { isOutage } from '../surense.js';
 
 /** How the source of an event ended up. */
 export const SOURCE_STATE = {
@@ -131,7 +132,13 @@ export async function enrichEvent({
     // retrying rather than recording as "this lead has no source".
     return {
       sourceState: SOURCE_STATE.failed,
-      sourceError: `lead lookup failed: ${error.message}`
+      sourceError: `lead lookup failed: ${error.message}`,
+
+      // Says whether the CRM refused everyone or only this lead. The caller
+      // stops the batch on the first of these: the next twenty-four lookups
+      // would ask the same question of the same unavailable service, and
+      // against a 429 that is not a retry but the cause.
+      outage: isOutage(error)
     };
   }
 
@@ -285,7 +292,14 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
   const events = await db.pendingEnrichment({ limit });
 
   const summary = {
-    processed: 0, resolved: 0, failed: 0, absent: 0, catalogRefreshed: false
+    processed: 0, resolved: 0, failed: 0, absent: 0, catalogRefreshed: false,
+
+    // Set when the CRM itself is the problem. Named rather than folded into
+    // `failed`, because the two need opposite responses: a failed row is a
+    // question about that lead, an outage is a question for whoever runs the
+    // CRM — and the service went eight days looking like the first while
+    // being the second.
+    outage: null
   };
 
   if (!events.length) return summary;
@@ -312,6 +326,16 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
       columns: config.messaging.columns,
       onUnknownSource
     });
+
+    // The CRM is down, refusing, or rate-limiting. Stop here and write
+    // nothing: every remaining event would get the identical failure, each
+    // one spending an attempt it will never get back and asking a throttled
+    // endpoint one more time. The rows are left exactly as they were, so the
+    // next run finds them unchanged rather than one attempt poorer.
+    if (patch.outage) {
+      summary.outage = patch.sourceError;
+      break;
+    }
 
     await db.enrichStatusEvent(event.id, patch);
 

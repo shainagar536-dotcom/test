@@ -1,4 +1,5 @@
 import { enrichEvent, refreshSourceCatalog } from '../events/enrich.js';
+import { isOutage } from '../surense.js';
 
 /**
  * Turning a Surense webhook delivery into a recorded change.
@@ -230,18 +231,34 @@ export async function recordDelivery({ db, payload, client, config }) {
         }
       });
 
-      await db.enrichStatusEvent(id, patch);
-      enriched = patch;
+      // The CRM refused everyone, not this lead. Writing the failure here
+      // would spend one of the event's retry attempts on a verdict that is
+      // not about it — and during an outage every arriving event spends one
+      // the same way, so a long enough outage retires the whole queue before
+      // anybody notices. The event stays pending and the retry pass owns it.
+      if (patch.outage) {
+        enriched = { sourceState: 'pending', sourceError: patch.sourceError };
+      } else {
+        await db.enrichStatusEvent(id, patch);
+        enriched = patch;
+      }
     } catch (error) {
       // Recorded but not enriched is a valid state, and the retry pass exists
       // precisely for it. Failing the request here would make Surense retry a
       // delivery we have already stored.
-      await db.enrichStatusEvent(id, {
-        sourceState: 'failed',
-        sourceError: error.message
-      });
+      //
+      // An outage is left unwritten for the same reason as above: it costs
+      // the event an attempt and says nothing about it.
+      if (isOutage(error)) {
+        enriched = { sourceState: 'pending', sourceError: error.message };
+      } else {
+        await db.enrichStatusEvent(id, {
+          sourceState: 'failed',
+          sourceError: error.message
+        });
 
-      enriched = { sourceState: 'failed', sourceError: error.message };
+        enriched = { sourceState: 'failed', sourceError: error.message };
+      }
     }
   }
 

@@ -330,6 +330,12 @@ export function createApi({ db, config, fetchImpl }) {
       copyTo: messaging.copyTo || null,
 
       floodBrake,
+
+      // Unsent events nothing will try again, because their attempts ran out
+      // while the CRM was unreachable. Reported where the sender already
+      // looks, since nowhere else would have shown them at all.
+      stuck: await db.exhaustedCount(),
+
       skipped: summarizeSkips(skipped),
       messages: ready
     };
@@ -688,6 +694,24 @@ export function createApi({ db, config, fetchImpl }) {
 
   // Claims events as sent. Two senders running at once get disjoint sets, so
   // no message goes out twice.
+  // Gives back the retry attempts an outage spent.
+  //
+  // The cap exists for a lead the CRM cannot answer for. It is wrong for an
+  // event that merely happened to be queued while the CRM was unreachable —
+  // and a long outage silently exhausts every row in the queue, which is how
+  // three hundred notifications stopped being retried without any number
+  // anywhere changing.
+  route('POST', /^\/api\/events\/retry$/, async () => {
+    const revived = await db.reviveExhausted();
+
+    return {
+      revived,
+      note: revived
+        ? 'They are pending again. The next enrichment pass will pick them up.'
+        : 'Nothing was out of attempts.'
+    };
+  });
+
   route('POST', /^\/api\/events\/notified$/, async request => {
     const body = await readJsonBody(request);
     const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : [];

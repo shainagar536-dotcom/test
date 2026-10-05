@@ -1990,3 +1990,104 @@ test('a CRM source nothing has moved for reads zero, and that is the truth', asy
   assert.equal(row.leads, 0);
   assert.equal(row.fromCrm, true);
 });
+
+// -------------------------------------------- when the CRM is the problem
+
+test('an unreachable CRM stops the batch instead of spending every attempt', async () => {
+  for (let i = 0; i < 5; i++) {
+    await db.recordStatusEvent({
+      leadId: 'lead-' + i, customerName: 'x', statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: '2026-10-05T09:00:00Z'
+    });
+  }
+
+  let calls = 0;
+  const client = {
+    fetchLeadById: async () => {
+      calls++;
+      const error = new Error('Token request failed (HTTP 429)');
+      error.status = 429;
+      throw error;
+    }
+  };
+
+  const summary = await enrichPending({ db, client, config, limit: 25 });
+
+  // One ask, not five. Against a service that just said it is receiving too
+  // many requests, the other four are the cause rather than a retry.
+  assert.equal(calls, 1);
+  assert.match(summary.outage, /429/);
+  assert.equal(summary.processed, 0);
+
+  // And nothing was written: the rows are exactly as they were, so the next
+  // run finds them whole rather than one attempt poorer.
+  for (const event of await db.listStatusEvents({})) {
+    assert.equal(event.enrich_attempts, 0);
+    assert.equal(event.source_state, 'pending');
+  }
+});
+
+test('a failure about one lead still counts against that lead', async () => {
+  await db.recordStatusEvent({
+    leadId: 'lead-1', customerName: 'x', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-10-05T09:00:00Z'
+  });
+  await db.recordStatusEvent({
+    leadId: 'lead-2', customerName: 'y', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-10-05T09:05:00Z'
+  });
+
+  const client = {
+    fetchLeadById: async () => { throw new Error('no matching lead returned'); }
+  };
+
+  const summary = await enrichPending({ db, client, config, limit: 25 });
+
+  // Not an outage: the CRM answered, it just had nothing for these leads. So
+  // both are tried and both spend an attempt.
+  assert.equal(summary.outage, null);
+  assert.equal(summary.processed, 2);
+
+  for (const event of await db.listStatusEvents({})) {
+    assert.equal(event.enrich_attempts, 1);
+  }
+});
+
+test('events that ran out of attempts are counted, and can be given them back',
+  async () => {
+    const { id } = await db.recordStatusEvent({
+      leadId: 'lead-1', customerName: 'x', statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: '2026-10-05T09:00:00Z'
+    });
+
+    await db.pool.query(
+      `UPDATE status_events SET enrich_attempts = 5, source_state = 'failed'
+        WHERE id = $1`, [id]);
+
+    // Nothing picks it up any more, and until now nothing said so either.
+    assert.equal((await db.pendingEnrichment({})).length, 0);
+    assert.equal(await db.exhaustedCount(), 1);
+
+    const outbox = await (await call('/api/outbox')).json();
+    assert.equal(outbox.stuck, 1);
+
+    const { revived } = await (await call('/api/events/retry',
+      { method: 'POST' })).json();
+
+    assert.equal(revived, 1);
+    assert.equal(await db.exhaustedCount(), 0);
+    assert.equal((await db.pendingEnrichment({})).length, 1, 'in the queue again');
+  });
+
+test('reviving never touches an event that was already sent', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: 'lead-1', customerName: 'x', statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: '2026-10-05T09:00:00Z'
+  });
+
+  await db.markEventsNotified([id], 'email', 'a@b.c');
+  await db.pool.query(
+    `UPDATE status_events SET enrich_attempts = 5 WHERE id = $1`, [id]);
+
+  assert.equal(await db.reviveExhausted(), 0, 'its message is gone either way');
+});
