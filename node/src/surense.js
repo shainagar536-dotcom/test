@@ -12,12 +12,13 @@
 const ROW_KEYS = ['rows', 'data', 'results', 'items', 'leads', 'fields'];
 
 export class SurenseError extends Error {
-  constructor(message, { status = 0, body = '', hint = '' } = {}) {
+  constructor(message, { status = 0, body = '', hint = '', retryAfter = null } = {}) {
     super(message);
     this.name = 'SurenseError';
     this.status = status;
     this.body = body;
     this.hint = hint;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -112,8 +113,14 @@ export class SurenseClient {
     const body = await response.text();
 
     if (!response.ok) {
+      // Retry-After is the service telling us exactly how long it wants to be
+      // left alone. Worth carrying: without it, "rate limited" is indistinct
+      // from "blocked", and the two call for opposite responses — waiting, or
+      // asking somebody.
+      const retryAfter = response.headers?.get?.('retry-after') ?? null;
+
       throw new SurenseError(`Token request failed (HTTP ${response.status})`, {
-        status: response.status, body, hint: hintFor(response.status)
+        status: response.status, body, retryAfter, hint: hintFor(response.status)
       });
     }
 

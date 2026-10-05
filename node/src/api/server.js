@@ -1104,7 +1104,21 @@ export function createApi({ db, config, fetchImpl }) {
     } catch (error) {
       return {
         settings,
-        auth: { ok: false, scope: null, error: error.message, hint: error.hint || null },
+        auth: {
+          ok: false,
+          scope: null,
+          error: error.message,
+          hint: error.hint || null,
+          status: error.status || null,
+
+          // What the service said in its own words, and how long it asked to
+          // be left alone. A 429 that names a window is something to wait
+          // out; one that names a revoked key is something to go and fix.
+          // Guessing between them is how an outage gets blamed on the wrong
+          // party. Trimmed, because a token endpoint can answer with a page.
+          retryAfter: error.retryAfter || null,
+          body: String(error.body ?? '').slice(0, 600) || null
+        },
         apiBase: null,
         sourceCatalog: null
       };
