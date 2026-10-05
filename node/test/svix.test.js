@@ -62,7 +62,7 @@ before(async () => {
 
 after(async () => { server?.close(); await db?.close(); });
 
-beforeEach(() => db.pool.query('TRUNCATE webhook_events'));
+beforeEach(() => db.pool.query('TRUNCATE webhook_events, settings'));
 
 const post = (body, headers) => fetch(`${baseUrl}/webhook/surense`, {
   method: 'POST',

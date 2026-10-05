@@ -2194,3 +2194,37 @@ test('a token that goes through clears the deadline', async () => {
   assert.equal(token, 't');
   assert.equal(await db.crmCooldown(), null, 'nothing is holding anyone back');
 });
+
+test('a refused key is named as such, and not retried into a rate limit', async () => {
+  const { SurenseClient } = await import('../src/surense.js');
+
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return {
+      ok: false, status: 401,
+      headers: { get: () => null },
+      text: async () =>
+        '{"error":"invalid_client","error_description":"Client authentication failed."}'
+    };
+  };
+
+  const cooldown = {
+    read: () => db.crmCooldown(), write: (u) => db.setCrmCooldown(u)
+  };
+
+  const make = () => new SurenseClient({
+    clientId: 'c', clientSecret: 's', tokenUrl: 'https://crm.test/oauth/token',
+    apiBases: ['https://crm.test/api/v1'], fetchImpl, cooldown
+  });
+
+  // Named for what it is. "Token request failed (HTTP 401)" sent us looking
+  // at rate limits for eight days; the key was the problem the whole time.
+  await assert.rejects(() => make().authenticate(),
+    /Credentials rejected .* SURENSE_CLIENT_ID/);
+
+  // And the next run does not ask again. Asking is what earned the 429 that
+  // then hid this very error.
+  await assert.rejects(() => make().authenticate(), /waiting \d+s/);
+  assert.equal(calls, 1);
+});

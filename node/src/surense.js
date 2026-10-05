@@ -47,6 +47,9 @@ function hintFor(status) {
  * @param {?Error} error
  * @returns {boolean}
  */
+/** How long a refused key is left alone. Long enough not to earn a 429. */
+const CREDENTIAL_COOLDOWN_MS = 30 * 60 * 1000;
+
 export function isOutage(error) {
   if (!error) return false;
 
@@ -143,6 +146,21 @@ export class SurenseClient {
       // Written down so every later caller honours it too, not only this one.
       if (response.status === 429 && Number(retryAfter) > 0) {
         await this.cooldown?.write?.(new Date(Date.now() + Number(retryAfter) * 1000));
+      }
+
+      // Rejected credentials are the one failure that retrying cannot mend,
+      // and retrying them is what earns the rate limit that then hides them.
+      // That is the whole shape of this outage: a 401 nobody could see,
+      // behind a 429 our own retries kept alive. So a refused key buys the
+      // same silence a 429 does — long enough that the hourly run cannot
+      // turn a fixable mistake back into an invisible one.
+      if (response.status === 401 || response.status === 403) {
+        await this.cooldown?.write?.(new Date(Date.now() + CREDENTIAL_COOLDOWN_MS));
+
+        throw new SurenseError(
+          `Credentials rejected (HTTP ${response.status}) — ` +
+          'check SURENSE_CLIENT_ID and SURENSE_CLIENT_SECRET',
+          { status: response.status, body, hint: 'the key itself is the problem; retrying will not help' });
       }
 
       throw new SurenseError(`Token request failed (HTTP ${response.status})`, {

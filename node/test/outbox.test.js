@@ -63,7 +63,7 @@ after(async () => {
 
 beforeEach(async () => {
   await db.pool.query(
-    'TRUNCATE leads, changes, templates, recipients, muted_statuses, source_names, sources, cursors');
+    'TRUNCATE leads, changes, templates, recipients, muted_statuses, source_names, sources, cursors, settings');
 
   // History is append-only; clearing it in a test has to say so.
   await db.pool.query("BEGIN; SET LOCAL app.allow_history_delete = 'on'; " +

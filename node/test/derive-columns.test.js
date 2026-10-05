@@ -77,7 +77,7 @@ before(async () => {
 after(async () => { await db?.close(); });
 
 beforeEach(async () => {
-  await db.pool.query('TRUNCATE leads, changes, sync_runs');
+  await db.pool.query('TRUNCATE leads, changes, sync_runs, settings');
   crmLeads = [lead(1), lead(2), lead(3)];
 });
 
