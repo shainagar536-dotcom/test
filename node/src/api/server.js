@@ -1249,7 +1249,18 @@ export function createApi({ db, config, fetchImpl }) {
         id: unwrapped?.id ?? null
       };
     } catch (error) {
-      return { status: 502, body: { error: error.message, customerId } };
+      // The CRM's own words, not just our status line. A 400 that says
+      // "customer not found" and one that says "malformed id" need opposite
+      // responses, and the message alone cannot tell them apart.
+      return {
+        status: 502,
+        body: {
+          error: error.message,
+          crmSaid: error.body ?? null,
+          hint: error.hint ?? null,
+          customerId
+        }
+      };
     }
   });
 
@@ -1261,7 +1272,10 @@ export function createApi({ db, config, fetchImpl }) {
     try {
       lead = await client.fetchLeadById(leadId);
     } catch (error) {
-      return { status: 502, body: { error: error.message, leadId } };
+      return {
+        status: 502,
+        body: { error: error.message, crmSaid: error.body ?? null, leadId }
+      };
     }
 
     // Labels are best-effort: without them the keys are still readable, and
