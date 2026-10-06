@@ -1093,6 +1093,7 @@ export class Database {
               source_name   = coalesce(NULLIF($4, ''), source_name),
               source_state  = $5,
               source_error  = $6,
+              source_checked_at = now(),
               enrich_attempts = enrich_attempts + 1
         WHERE id = $1`,
       [id, patch.assigneeName ?? '', patch.sourceId ?? '', patch.sourceName ?? '',
@@ -1327,6 +1328,80 @@ export class Database {
           AND notified_at IS NULL
           AND source_state <> 'resolved'`,
       [wanted]);
+
+    return rowCount;
+  }
+
+  /**
+   * Customers behind blocked events, oldest-checked first.
+   *
+   * Grouped by customer rather than listed by event, because the refusal is
+   * about the customer: one question answers every event behind it, and
+   * thirty-six questions cover what would otherwise be a hundred.
+   *
+   * @param {object} [options]
+   * @param {number} [options.hours]  Leave a customer alone for this long
+   *                                  after asking about it.
+   * @param {number} [options.limit]
+   * @returns {Promise<Array<{customer_id: string, events: number}>>}
+   */
+  async blockedCustomers({ hours = 20, limit = 40 } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT customer_id,
+              count(*)::int AS events,
+              min(source_checked_at) AS checked_at
+         FROM status_events
+        WHERE source_state = 'blocked'
+          AND notified_at IS NULL
+          AND customer_id <> ''
+        GROUP BY customer_id
+       HAVING min(source_checked_at) IS NULL
+           OR min(source_checked_at) < now() - ($1 || ' hours')::interval
+        ORDER BY checked_at NULLS FIRST
+        LIMIT $2`,
+      [String(hours), limit]);
+
+    return rows;
+  }
+
+  /**
+   * Notes that a blocked customer was asked about and still refused.
+   *
+   * Only the timestamp moves. The attempt counter deliberately does not: the
+   * row is not failing, it is waiting for a permission, and counting these as
+   * attempts would retire it exactly when the daily re-check is the one thing
+   * keeping it alive.
+   *
+   * @param {string} customerId
+   * @returns {Promise<number>}
+   */
+  async touchBlockedCustomer(customerId) {
+    const { rowCount } = await this.pool.query(
+      `UPDATE status_events
+          SET source_checked_at = now()
+        WHERE customer_id = $1 AND source_state = 'blocked' AND notified_at IS NULL`,
+      [customerId]);
+
+    return rowCount;
+  }
+
+  /**
+   * Puts every blocked event of one customer back in the queue.
+   *
+   * For the moment a permission is granted: one readable customer releases
+   * all of its events at once, and nobody has to name them.
+   *
+   * @param {string} customerId
+   * @returns {Promise<number>}
+   */
+  async requeueBlockedCustomer(customerId) {
+    const { rowCount } = await this.pool.query(
+      `UPDATE status_events
+          SET source_state = 'pending',
+              enrich_attempts = 0,
+              source_checked_at = now()
+        WHERE customer_id = $1 AND source_state = 'blocked' AND notified_at IS NULL`,
+      [customerId]);
 
     return rowCount;
   }

@@ -12,7 +12,8 @@ import assert from 'node:assert/strict';
 import { Database } from '../src/db/index.js';
 import { createApi } from '../src/api/server.js';
 import { recordDelivery } from '../src/webhook/lead-updated.js';
-import { enrichEvent, enrichPending, SOURCE_STATE } from '../src/events/enrich.js';
+import { enrichEvent, enrichPending, recheckBlocked,
+  SOURCE_STATE } from '../src/events/enrich.js';
 import { buildEventOutbox, SKIP } from '../src/notify/outbox.js';
 import { SurenseClient } from '../src/surense.js';
 import { DELIVERY_LABELS as DELIVERY_LABELS_FOR_TEST } from '../src/dashboard/labels.js';
@@ -2638,4 +2639,129 @@ test('a sent event is refused, not quietly looked up again', async () => {
   await db.markEventsNotified([id], 'email', 'roi@example.com');
 
   assert.equal(await db.requeueEvents([id]), 0);
+});
+
+// ------------------------------------- watching for the permission to appear
+//
+// "לא משנה מי הבעלים הכל ישלח כרגיל". A blocked row is terminal because
+// nothing here can grant a permission — but terminal must not mean forgotten.
+// Once a day each refused customer is asked about once, so the day somebody
+// fixes it in Surense, the events behind it release themselves.
+
+test('the day the permission appears, the events release themselves', async () => {
+  const refusing = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  for (const status of ['לא ענה', 'בטיפול']) {
+    await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: status, occurredAt: `2026-09-0${status === 'לא ענה' ? 6 : 7}T09:00:00Z`
+    });
+  }
+
+  await enrichPending({ db, client: refusing.client, config });
+  assert.equal(await db.blockedCount(), 2);
+
+  // Somebody changes the owner in the CRM. Nobody tells this service — and
+  // a day goes by, which is the cycle this watch runs on.
+  await db.upsertSources([{ id: SOURCE, name: SOURCE_TITLE }], 'crm');
+  await db.pool.query(
+    "UPDATE status_events SET source_checked_at = now() - interval '1 day'");
+
+  // The permission is per customer — "אינך מורשה ... על לקוח זה" — so the
+  // customer is what becomes readable, and the lead with it.
+  const granted = fakeCrm({
+    customer: { id: CUSTOMER, sourceId: SOURCE, sourceName: SOURCE_TITLE }
+  });
+
+  const summary = await enrichPending({
+    db, client: granted.client, config
+  });
+
+  assert.equal(summary.recheck.opened, 1, 'the customer answered');
+  assert.equal(summary.recheck.released, 2, 'both of its events came back');
+  assert.equal(await db.blockedCount(), 0);
+
+  // And they are resolved in the same pass, not merely requeued.
+  assert.equal(summary.resolved, 2);
+});
+
+test('a customer still refused is asked once a day, not once an hour',
+  async () => {
+    const refusing = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+    await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    await enrichPending({ db, client: refusing.client, config });
+
+    const after = refusing.calls.customer;
+
+    // Four more hourly runs. The sweep must not ask again on any of them:
+    // a hundred rows asked hourly is the volume that turned a rate limit
+    // into an eight-day outage.
+    for (let run = 0; run < 4; run++) {
+      const summary = await enrichPending({ db, client: refusing.client, config });
+      assert.equal(summary.recheck.asked, 0, `run ${run + 1} asked anyway`);
+    }
+
+    assert.equal(refusing.calls.customer, after);
+  });
+
+test('the sweep does not spend the attempts that keep a row alive', async () => {
+  const refusing = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+  });
+
+  await enrichPending({ db, client: refusing.client, config });
+  const [first] = await db.listStatusEvents({ ids: [id] });
+
+  // Asking is not failing. If the daily look counted as an attempt it would
+  // retire the row in five days — exactly when the look is the one thing
+  // still watching for the permission.
+  await db.pool.query(
+    "UPDATE status_events SET source_checked_at = now() - interval '2 days'");
+
+  const summary = await enrichPending({ db, client: refusing.client, config });
+  assert.equal(summary.recheck.asked, 1);
+  assert.equal(summary.recheck.stillRefused, 1);
+
+  const [again] = await db.listStatusEvents({ ids: [id] });
+  assert.equal(again.enrich_attempts, first.enrich_attempts);
+  assert.equal(again.source_state, 'blocked');
+});
+
+test('a CRM that is down stops the sweep instead of hammering it', async () => {
+  // Same rule as everywhere else: one refusal per record, never a loop
+  // against a service that is refusing everyone.
+  const refusing = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  for (const id of ['aaaaaaaa-0000-4000-8000-000000000001',
+    'bbbbbbbb-0000-4000-8000-000000000002']) {
+    await db.recordStatusEvent({
+      leadId: id, customerId: id, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+  }
+
+  await enrichPending({ db, client: refusing.client, config });
+
+  const down = new SurenseClient({
+    ...config.surense,
+    fetchImpl: async (url) => new Response(
+      JSON.stringify(String(url).includes('/oauth/token')
+        ? { access_token: 'tok', expires_in: 3600 }
+        : { error: 'nope' }),
+      { status: String(url).includes('/oauth/token') ? 200 : 503,
+        headers: { 'Content-Type': 'application/json' } })
+  });
+
+  const summary = await recheckBlocked({ db, client: down, hours: 0 });
+
+  assert.ok(summary.outage, 'a 503 is the CRM refusing everyone');
+  assert.equal(summary.asked, 1, 'and it was asked exactly once');
 });

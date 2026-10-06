@@ -11,7 +11,8 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { runSync, syncInProgress } from '../sync/run.js';
 import { buildEventOutbox, summarizeSkips } from '../notify/outbox.js';
-import { enrichPending, backfillAmounts, refreshSourceCatalog } from '../events/enrich.js';
+import { enrichPending, backfillAmounts, refreshSourceCatalog, recheckBlocked }
+  from '../events/enrich.js';
 import { parseCsv, buildRecipients, reconcile } from '../notify/import.js';
 import { SEED_TEMPLATES, MUTED_STATUSES } from '../notify/seeds.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
@@ -732,6 +733,14 @@ export function createApi({ db, config, fetchImpl }) {
     const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const limit = Number(url.searchParams.get('limit') ?? 25);
     const effective = await configNow();
+
+    // Every refused customer, asked about right now rather than on the daily
+    // cycle. For the minute after a permission is granted in Surense: the
+    // sweep would find it within a day anyway, and nobody wants to wait a day
+    // to learn whether the thing they just did worked.
+    if (url.searchParams.get('blocked') === 'true') {
+      return recheckBlocked({ db, client, hours: 0, limit: 200 });
+    }
 
     // The backfill, for events that resolved before TOTAL_COLUMN named the
     // right field. Asked for explicitly: the normal pass leaves them alone,

@@ -368,6 +368,71 @@ export async function backfillAmounts({ db, client, config, limit = 50 }) {
 }
 
 /**
+ * Asks again about the customers the CRM refuses.
+ *
+ * A blocked row is terminal on purpose — nothing in this service can grant a
+ * permission — but "terminal" must not mean "forgotten". The owner's wish is
+ * that a status change reaches its source whoever owns the lead, and the only
+ * thing standing in the way is a permission inside Surense. So this watches
+ * for it: once a day each refused customer is asked about once, and the day
+ * the permission appears, every event behind it releases itself with nobody
+ * touching anything.
+ *
+ * Deliberately cheap. It asks about the CUSTOMER only — one request, the
+ * record the refusal actually names — rather than re-running the full
+ * enrichment, which would read the lead twice first. Thirty-six questions
+ * instead of three hundred, and the full enrichment follows only for the
+ * customers that answered.
+ *
+ * @param {object} input
+ * @param {import('../db/index.js').Database} input.db
+ * @param {import('../surense.js').SurenseClient} input.client
+ * @param {number} [input.hours]   How long to leave a refused customer alone.
+ * @param {number} [input.limit]   Customers per sweep.
+ * @returns {Promise<{asked: number, opened: number, released: number,
+ *                    stillRefused: number, outage: ?string}>}
+ */
+export async function recheckBlocked({ db, client, hours = 20, limit = 40 }) {
+  const summary = {
+    asked: 0, opened: 0, released: 0, stillRefused: 0, outage: null
+  };
+
+  const customers = await db.blockedCustomers?.({ hours, limit }) ?? [];
+
+  for (const row of customers) {
+    summary.asked++;
+
+    try {
+      const customer = await client.fetchCustomerById(row.customer_id);
+
+      // Readable again. The permission is there, so hand every event behind
+      // this customer back to the ordinary pass — which reads the lead and
+      // gets the assignee and the amount too, not just the source.
+      summary.opened++;
+      summary.released += await db.requeueBlockedCustomer(row.customer_id);
+
+      // Nothing is read off `customer` here on purpose: the lead is the
+      // better answer now that it is reachable, and this call was a question
+      // about access, not a shortcut around it.
+      void customer;
+    } catch (error) {
+      if (isOutage(error)) {
+        // The CRM is refusing everyone. Stop: the remaining customers would
+        // each get the same answer, and asking anyway is what turns a rate
+        // limit into an outage.
+        summary.outage = error.message;
+        break;
+      }
+
+      summary.stillRefused++;
+      await db.touchBlockedCustomer(row.customer_id);
+    }
+  }
+
+  return summary;
+}
+
+/**
  * Enriches everything still waiting.
  *
  * The catalog is refreshed at most once for the whole batch: a hundred events
@@ -382,6 +447,12 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
   // The fallback below needs them, and they were in the stored deliveries all
   // along. Pure SQL, no request, and a no-op once nothing is missing.
   const linked = await db.linkCustomerIds?.() ?? 0;
+
+  // And look once a day at the customers the CRM refuses, so a permission
+  // granted in Surense releases their events on its own. The gate is inside:
+  // a customer asked about today is skipped, so this costs nothing on the
+  // other twenty-three runs.
+  const recheck = await recheckBlocked({ db, client });
 
   const events = await db.pendingEnrichment({ limit });
 
@@ -398,6 +469,11 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
     // Counted because it is the one failure a retry cannot touch, and the
     // fix is a permission inside Surense rather than anything here.
     blocked: 0,
+
+    // What the daily look at those refused customers found. `opened` above
+    // zero is the good news: a permission was granted and their events are
+    // back in the queue by themselves.
+    recheck,
 
     // Set when the CRM itself is the problem. Named rather than folded into
     // `failed`, because the two need opposite responses: a failed row is a

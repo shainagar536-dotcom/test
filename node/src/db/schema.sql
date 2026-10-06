@@ -269,6 +269,11 @@ ALTER TABLE status_events ADD COLUMN IF NOT EXISTS amount TEXT NOT NULL DEFAULT 
 
 ALTER TABLE status_events ADD COLUMN IF NOT EXISTS customer_id TEXT NOT NULL DEFAULT '';
 
+-- When the source was last asked about. Only needed for the rows the CRM
+-- refuses: they are re-checked on a slow cycle rather than every run, and
+-- without a timestamp "slow" has nothing to measure against.
+ALTER TABLE status_events ADD COLUMN IF NOT EXISTS source_checked_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS status_events_occurred_idx
     ON status_events (occurred_at DESC, id DESC);
 
