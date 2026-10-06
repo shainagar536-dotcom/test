@@ -1333,6 +1333,35 @@ export class Database {
   }
 
   /**
+   * The blocked events, named — not merely counted.
+   *
+   * A number says something is wrong; it does not say what to do. These rows
+   * are fixed one lead at a time, by changing its owner in the CRM, so the
+   * report has to carry the lead number and the customer or the reader is
+   * sent hunting through a dashboard for rows the dashboard cannot identify
+   * either.
+   *
+   * Newest first, and capped: this rides on a response the hourly run reads,
+   * and a list of a hundred would be a wall, not a list.
+   *
+   * @param {number} [limit]
+   * @returns {Promise<Array<object>>}
+   */
+  async blockedLeads(limit = 10) {
+    const { rows } = await this.pool.query(
+      `SELECT DISTINCT ON (lead_id)
+              lead_id, lead_number, customer_name, status_after, occurred_at
+         FROM status_events
+        WHERE source_state = 'blocked' AND notified_at IS NULL
+        ORDER BY lead_id, occurred_at DESC
+        LIMIT $1`,
+      [limit]);
+
+    // Ordered by recency for the reader, after the per-lead pick above.
+    return rows.sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at));
+  }
+
+  /**
    * Customers behind blocked events, oldest-checked first.
    *
    * Grouped by customer rather than listed by event, because the refusal is

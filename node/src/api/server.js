@@ -377,6 +377,10 @@ export function createApi({ db, config, fetchImpl }) {
       // work and hides the thing that can.
       blocked: await db.blockedCount(),
 
+      // Named, because this is fixed one lead at a time: the owner of that
+      // lead is changed in the CRM, and a count alone cannot say which.
+      blockedLeads: await db.blockedLeads(),
+
       // The alarm that needs no theory about the fault. Every other check
       // here recognises a specific failure, and the one that actually
       // happened was recognised by none of them — so this says only when

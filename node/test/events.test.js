@@ -2765,3 +2765,47 @@ test('a CRM that is down stops the sweep instead of hammering it', async () => {
   assert.ok(summary.outage, 'a 503 is the CRM refusing everyone');
   assert.equal(summary.asked, 1, 'and it was asked exactly once');
 });
+
+test('the blocked events are named, not merely counted', async () => {
+  // A count says something is wrong; it does not say what to do. These are
+  // fixed one lead at a time in the CRM, so the lead number has to travel
+  // with the number or the reader cannot act on it.
+  const { client } = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, leadNumber: '3713',
+    customerName: 'מאי מרגונטו', statusBefore: 'חדש',
+    statusAfter: "השהייה לי''כ", occurredAt: '2026-09-07T09:00:00Z'
+  });
+
+  await enrichPending({ db, client, config });
+
+  const body = await (await call('/api/outbox')).json();
+
+  assert.equal(body.blocked, 1);
+  assert.equal(body.blockedLeads.length, 1);
+  assert.equal(body.blockedLeads[0].lead_number, '3713');
+  assert.equal(body.blockedLeads[0].customer_name, 'מאי מרגונטו');
+});
+
+test('one lead that moved five times is one line, not five', async () => {
+  const { client } = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  for (let day = 1; day <= 5; day++) {
+    await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, leadNumber: '3713',
+      customerName: 'מאי מרגונטו', statusBefore: 'חדש', statusAfter: `שלב ${day}`,
+      occurredAt: `2026-09-0${day}T09:00:00Z`
+    });
+  }
+
+  await enrichPending({ db, client, config });
+
+  const body = await (await call('/api/outbox')).json();
+
+  assert.equal(body.blocked, 5);
+  assert.equal(body.blockedLeads.length, 1, 'one lead, one line');
+
+  // And the line carries where the lead is now, not where it started.
+  assert.equal(body.blockedLeads[0].status_after, 'שלב 5');
+});
