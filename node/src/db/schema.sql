@@ -274,6 +274,15 @@ ALTER TABLE status_events ADD COLUMN IF NOT EXISTS customer_id TEXT NOT NULL DEF
 -- without a timestamp "slow" has nothing to measure against.
 ALTER TABLE status_events ADD COLUMN IF NOT EXISTS source_checked_at TIMESTAMPTZ;
 
+-- Set once a blocked event has been announced to the owner.
+--
+-- The alarm has to fire for a lead the CRM has just refused, and has to stop
+-- firing for one it refused last week. Without this mark those two are the
+-- same row, and the choice is between an alert that repeats every hour until
+-- it is ignored and one that never comes at all. Both have already happened
+-- here; this is what separates them.
+ALTER TABLE status_events ADD COLUMN IF NOT EXISTS blocked_announced_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS status_events_occurred_idx
     ON status_events (occurred_at DESC, id DESC);
 

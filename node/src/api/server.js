@@ -381,6 +381,12 @@ export function createApi({ db, config, fetchImpl }) {
       // lead is changed in the CRM, and a count alone cannot say which.
       blockedLeads: await db.blockedLeads(),
 
+      // The ones nobody has been told about yet. This is the alarm: a lead
+      // the CRM has just refused is news and goes out the same morning,
+      // where the same lead next week is a standing condition and says
+      // nothing. Reported, then acknowledged through /api/events/announced.
+      newlyBlocked: await db.unannouncedBlockedLeads(),
+
       // The alarm that needs no theory about the fault. Every other check
       // here recognises a specific failure, and the one that actually
       // happened was recognised by none of them — so this says only when
@@ -759,6 +765,23 @@ export function createApi({ db, config, fetchImpl }) {
 
   // Claims events as sent. Two senders running at once get disjoint sets, so
   // no message goes out twice.
+  // Acknowledges that the owner has been told about these blocked leads.
+  //
+  // Called after the report has gone out, never before. A run that dies
+  // between reading the alarm and sending it must leave the alarm standing:
+  // a repeated line costs a glance, and the other direction costs a
+  // notification nobody ever learns was lost.
+  route('POST', /^\/api\/events\/announced$/, async request => {
+    const body = await readJsonBody(request);
+    const leadIds = Array.isArray(body.leadIds) ? body.leadIds : [];
+
+    if (!leadIds.length) {
+      return { status: 400, body: { error: 'Send {"leadIds": ["...", "..."]}.' } };
+    }
+
+    return { marked: await db.markBlockedAnnounced(leadIds) };
+  });
+
   // Gives back the retry attempts an outage spent.
   //
   // The cap exists for a lead the CRM cannot answer for. It is wrong for an

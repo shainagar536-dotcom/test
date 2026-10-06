@@ -2809,3 +2809,86 @@ test('one lead that moved five times is one line, not five', async () => {
   // And the line carries where the lead is now, not where it started.
   assert.equal(body.blockedLeads[0].status_after, 'שלב 5');
 });
+
+// ------------------------------------------------- the alarm, told once
+//
+// "תעדכן אותי במייל אם יהיה ליד שלא ישלח בגלל שאני לא מוגדר הבעלים."
+// A lead the CRM has just refused is news. The same lead next week is not,
+// and an alert that repeats every hour stops being read — which is the
+// failure that started this whole thread.
+
+test('a newly blocked lead is news; the same one tomorrow is not', async () => {
+  const { client } = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, leadNumber: '3713',
+    customerName: 'מאי מרגונטו', statusBefore: 'חדש', statusAfter: 'בחתימה',
+    occurredAt: DELIVERY.date
+  });
+
+  await enrichPending({ db, client, config });
+
+  const first = await (await call('/api/outbox')).json();
+  assert.equal(first.newlyBlocked.length, 1);
+  assert.equal(first.newlyBlocked[0].lead_number, '3713');
+
+  // The report went out. Only now is it acknowledged.
+  const ack = await (await call('/api/events/announced', {
+    method: 'POST',
+    body: JSON.stringify({ leadIds: first.newlyBlocked.map(row => row.lead_id) })
+  })).json();
+
+  assert.ok(ack.marked > 0);
+
+  const second = await (await call('/api/outbox')).json();
+  assert.equal(second.newlyBlocked.length, 0, 'said once, not every hour');
+
+  // Still counted and still listed — it is a standing condition, not gone.
+  assert.equal(second.blocked, 1);
+  assert.equal(second.blockedLeads.length, 1);
+});
+
+test('a run that dies before reporting leaves the alarm standing', async () => {
+  const { client } = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, leadNumber: '3713',
+    statusBefore: 'חדש', statusAfter: 'בחתימה', occurredAt: DELIVERY.date
+  });
+
+  await enrichPending({ db, client, config });
+
+  // Read, and then nothing — the acknowledgement never came.
+  await (await call('/api/outbox')).json();
+
+  const next = await (await call('/api/outbox')).json();
+
+  // A repeated line costs a glance. The other direction costs a
+  // notification nobody ever learns was lost.
+  assert.equal(next.newlyBlocked.length, 1);
+});
+
+test('a lead refused again after being fixed is news again', async () => {
+  const refusing = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, leadNumber: '3713',
+    statusBefore: 'חדש', statusAfter: 'בחתימה', occurredAt: DELIVERY.date
+  });
+
+  await enrichPending({ db, client: refusing.client, config });
+
+  const first = await (await call('/api/outbox')).json();
+  await call('/api/events/announced', {
+    method: 'POST',
+    body: JSON.stringify({ leadIds: first.newlyBlocked.map(row => row.lead_id) })
+  });
+
+  // Somebody fixes the owner, and later it is refused once more. That is a
+  // new fault about a new status change, not a repeat of the old alarm.
+  await db.requeueEvents([id]);
+  await enrichPending({ db, client: refusing.client, config });
+
+  const again = await (await call('/api/outbox')).json();
+  assert.equal(again.newlyBlocked.length, 1);
+});

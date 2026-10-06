@@ -1292,7 +1292,8 @@ export class Database {
     const { rowCount } = await this.pool.query(
       `UPDATE status_events
           SET enrich_attempts = 0,
-              source_state = 'pending'
+              source_state = 'pending',
+              blocked_announced_at = NULL
         WHERE source_state <> 'resolved'
           AND notified_at IS NULL
           AND (enrich_attempts >= $1 OR source_state = 'blocked')`,
@@ -1323,10 +1324,63 @@ export class Database {
     const { rowCount } = await this.pool.query(
       `UPDATE status_events
           SET enrich_attempts = 0,
-              source_state = 'pending'
+              source_state = 'pending',
+              blocked_announced_at = NULL
         WHERE id = ANY($1::bigint[])
           AND notified_at IS NULL
           AND source_state <> 'resolved'`,
+      [wanted]);
+
+    return rowCount;
+  }
+
+  /**
+   * Blocked leads the owner has not been told about yet.
+   *
+   * The whole alarm. A lead the CRM has just refused is news and has to reach
+   * him the same morning; the same lead a week later is not, and saying it
+   * again every hour is how an alert stops being read. Only the mark below
+   * separates the two.
+   *
+   * @param {number} [limit]
+   * @returns {Promise<Array<object>>}
+   */
+  async unannouncedBlockedLeads(limit = 20) {
+    const { rows } = await this.pool.query(
+      `SELECT DISTINCT ON (lead_id)
+              lead_id, lead_number, customer_name, status_after, occurred_at
+         FROM status_events
+        WHERE source_state = 'blocked'
+          AND notified_at IS NULL
+          AND blocked_announced_at IS NULL
+        ORDER BY lead_id, occurred_at DESC
+        LIMIT $1`,
+      [limit]);
+
+    return rows.sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at));
+  }
+
+  /**
+   * Records that these leads have been reported.
+   *
+   * Called after the report has actually gone out, never before: a run that
+   * dies between reading and reporting must leave the alarm standing, so the
+   * next run says it again. A duplicate costs a line; the other direction
+   * costs a notification nobody ever learns was lost.
+   *
+   * @param {Array<string>} leadIds
+   * @returns {Promise<number>}
+   */
+  async markBlockedAnnounced(leadIds) {
+    const wanted = (leadIds ?? []).map(String).filter(Boolean);
+    if (!wanted.length) return 0;
+
+    const { rowCount } = await this.pool.query(
+      `UPDATE status_events
+          SET blocked_announced_at = now()
+        WHERE lead_id = ANY($1::text[])
+          AND source_state = 'blocked'
+          AND blocked_announced_at IS NULL`,
       [wanted]);
 
     return rowCount;
@@ -1428,7 +1482,10 @@ export class Database {
       `UPDATE status_events
           SET source_state = 'pending',
               enrich_attempts = 0,
-              source_checked_at = now()
+              source_checked_at = now(),
+              -- Cleared with the state: if this record is ever refused again
+              -- that is news again, not a repeat of an old alarm.
+              blocked_announced_at = NULL
         WHERE customer_id = $1 AND source_state = 'blocked' AND notified_at IS NULL`,
       [customerId]);
 
