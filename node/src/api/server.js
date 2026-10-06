@@ -1245,15 +1245,36 @@ export function createApi({ db, config, fetchImpl }) {
 
       const unwrapped = raw?.fields ?? raw?.data ?? raw;
 
+      // Named fields rather than the whole record: this answers a question
+      // about ACCESS — who owns the customer and whether it is restricted —
+      // and a customer's personal details are no part of that question.
+      const pick = (key) => unwrapped?.[key] ?? null;
+
       return {
         customerId,
         // Both shapes, so a wrapper that moved is visible rather than
         // looking like a customer with no source on it.
-        topKeys: Object.keys(raw ?? {}),
         keys: Object.keys(unwrapped ?? {}),
-        sourceId: unwrapped?.sourceId ?? null,
-        sourceName: unwrapped?.sourceName ?? null,
-        id: unwrapped?.id ?? null
+        sourceId: pick('sourceId'),
+        sourceName: pick('sourceName'),
+        id: pick('id'),
+
+        // Why one customer is readable and the next is not. Permission in
+        // this CRM hangs on who manages the record and whether it is marked
+        // restricted, so those are the fields worth comparing.
+        access: {
+          managerId: pick('managerId'),
+          managers: pick('managers'),
+          sensitive: pick('sensitive'),
+          agencyId: pick('agencyId'),
+          tenantId: pick('tenantId'),
+          createdBy: pick('createdBy'),
+          creatorName: pick('creatorName'),
+          statusName: pick('statusName'),
+          statusActive: pick('statusActive'),
+          relatedCustomers: Array.isArray(pick('relatedCustomers'))
+            ? pick('relatedCustomers').length : pick('relatedCustomers')
+        }
       };
     } catch (error) {
       // The CRM's own words, not just our status line. A 400 that says
