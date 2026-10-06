@@ -1222,6 +1222,37 @@ export function createApi({ db, config, fetchImpl }) {
   // schema's labels to it, and names the fields that could plausibly be it.
   //
   // Read-only, and one lead at a time: it is a question, not a sync.
+  // One customer, as the CRM returns it.
+  //
+  // The fallback route to the referring source, so when an event cannot be
+  // resolved this says whether the customer actually answers and what it
+  // carries — rather than leaving "the customer did not answer" as the only
+  // thing anybody can see.
+  route('GET', /^\/api\/crm\/customer\/([^/]+)$/, async (_request, params) => {
+    const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
+    const customerId = decodeURIComponent(params[0]);
+
+    try {
+      const raw = await client.request(
+        'GET', `/customers/${encodeURIComponent(customerId)}`);
+
+      const unwrapped = raw?.fields ?? raw?.data ?? raw;
+
+      return {
+        customerId,
+        // Both shapes, so a wrapper that moved is visible rather than
+        // looking like a customer with no source on it.
+        topKeys: Object.keys(raw ?? {}),
+        keys: Object.keys(unwrapped ?? {}),
+        sourceId: unwrapped?.sourceId ?? null,
+        sourceName: unwrapped?.sourceName ?? null,
+        id: unwrapped?.id ?? null
+      };
+    } catch (error) {
+      return { status: 502, body: { error: error.message, customerId } };
+    }
+  });
+
   route('GET', /^\/api\/crm\/lead\/([^/]+)$/, async (_request, params) => {
     const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const leadId = decodeURIComponent(params[0]);

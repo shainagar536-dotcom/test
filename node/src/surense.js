@@ -444,9 +444,10 @@ export class SurenseClient {
     const customer = await this.request(
       'GET', `/customers/${encodeURIComponent(customerId)}`);
 
-    // Same shape question as the leads: some calls wrap the record in
-    // `fields`, and a reply about a different customer is not an answer.
-    const found = customer?.fields ?? customer;
+    // Same shape question as the leads: some calls wrap the record, and a
+    // reply about a different customer is not an answer. Both wrappers are
+    // unwrapped — `/customers/{id}` has been seen to use `data`.
+    const found = customer?.fields ?? customer?.data ?? customer;
     if (!found || (found.id && String(found.id) !== String(customerId))) {
       throw new SurenseError(
         `Customer ${customerId} was not returned by the CRM`,
