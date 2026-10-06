@@ -2595,3 +2595,47 @@ test('a permission granted in Surense brings the blocked events back',
     assert.equal(event.source_state, 'resolved');
     assert.equal(event.source_name, SOURCE_TITLE);
   });
+
+test('one customer fixed is re-checked without re-asking about the rest',
+  async () => {
+    // The whole point of naming ids: a permission corrected on one customer
+    // is no reason to re-ask the CRM about a hundred records it has already
+    // refused, and on a rate-limited endpoint that volume is the next fault.
+    const { client } = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+    const mine = await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    const other = await db.recordStatusEvent({
+      leadId: 'c4f7a1d2-0000-4000-8000-000000000001', customerId: CUSTOMER,
+      statusBefore: 'חדש', statusAfter: 'לא ענה', occurredAt: '2026-09-07T10:00:00Z'
+    });
+
+    await enrichPending({ db, client, config });
+
+    const answer = await (await call('/api/events/retry', {
+      method: 'POST', body: JSON.stringify({ ids: [mine.id] })
+    })).json();
+
+    assert.equal(answer.requeued, 1);
+
+    const [requeued] = await db.listStatusEvents({ ids: [mine.id] });
+    const [untouched] = await db.listStatusEvents({ ids: [other.id] });
+
+    assert.equal(requeued.source_state, 'pending');
+    assert.equal(requeued.enrich_attempts, 0);
+    assert.equal(untouched.source_state, 'blocked', 'the rest were left alone');
+  });
+
+test('a sent event is refused, not quietly looked up again', async () => {
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'חדש', statusAfter: 'לא ענה',
+    occurredAt: DELIVERY.date
+  });
+
+  await db.markEventsNotified([id], 'email', 'roi@example.com');
+
+  assert.equal(await db.requeueEvents([id]), 0);
+});

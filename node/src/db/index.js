@@ -1300,6 +1300,37 @@ export class Database {
     return rowCount;
   }
 
+  /**
+   * Puts named events back in the queue for another look.
+   *
+   * reviveExhausted revives everything at once, which is right after an
+   * outage and wrong after a single fix: one customer's permission being
+   * corrected is no reason to re-ask the CRM about a hundred records it has
+   * already refused, and on a rate-limited endpoint that volume is itself
+   * the next fault.
+   *
+   * Sent events are refused rather than reset: their message is gone, and a
+   * second lookup cannot change it.
+   *
+   * @param {Array<number>} ids
+   * @returns {Promise<number>}  rows requeued
+   */
+  async requeueEvents(ids) {
+    const wanted = (ids ?? []).map(Number).filter(Number.isFinite);
+    if (!wanted.length) return 0;
+
+    const { rowCount } = await this.pool.query(
+      `UPDATE status_events
+          SET enrich_attempts = 0,
+              source_state = 'pending'
+        WHERE id = ANY($1::bigint[])
+          AND notified_at IS NULL
+          AND source_state <> 'resolved'`,
+      [wanted]);
+
+    return rowCount;
+  }
+
   async pendingEnrichment({ limit = 25, maxAttempts = 5 } = {}) {
     const { rows } = await this.pool.query(
       `SELECT * FROM status_events

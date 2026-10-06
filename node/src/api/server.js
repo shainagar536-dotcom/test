@@ -752,7 +752,22 @@ export function createApi({ db, config, fetchImpl }) {
   // and a long outage silently exhausts every row in the queue, which is how
   // three hundred notifications stopped being retried without any number
   // anywhere changing.
-  route('POST', /^\/api\/events\/retry$/, async () => {
+  route('POST', /^\/api\/events\/retry$/, async (request) => {
+    // With ids, only those: after fixing one customer's permission there is
+    // no reason to re-ask the CRM about every record it has already refused.
+    const body = await readJsonBody(request).catch(() => ({}));
+    const ids = Array.isArray(body?.ids) ? body.ids : null;
+
+    if (ids?.length) {
+      const requeued = await db.requeueEvents(ids);
+
+      return {
+        requested: ids.length,
+        requeued,
+        note: 'Those are pending again. The next enrichment pass looks at them.'
+      };
+    }
+
     const revived = await db.reviveExhausted();
 
     return {
