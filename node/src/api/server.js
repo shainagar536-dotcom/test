@@ -1436,6 +1436,19 @@ export function createApi({ db, config, fetchImpl }) {
 
     return {
       leadId,
+
+      // Who the lead belongs to, straight off the row. The access question
+      // this route keeps being asked turns on the lead's OWNER, which is a
+      // different field from the customer's manager — and reading one while
+      // meaning the other sent a whole investigation down the wrong path.
+      owner: {
+        ownerId: lead?.ownerId ?? null,
+        ownerName: lead?.ownerName ?? null,
+        assigneeId: lead?.assigneeId ?? null,
+        assigneeName: lead?.assigneeName ?? null,
+        sourceId: lead?.sourceId ?? null
+      },
+
       configured: (await messagingNow()).columns.total || null,
       // The answer, when there is one: set TOTAL_COLUMN to this key.
       candidates,
