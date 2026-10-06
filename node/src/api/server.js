@@ -18,7 +18,8 @@ import { SEED_TEMPLATES, MUTED_STATUSES } from '../notify/seeds.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
 import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
-import { SurenseClient, tokenScopes, tokenIdentity } from '../surense.js';
+import { SurenseClient, tokenScopes, tokenIdentity, isForbiddenRecord }
+  from '../surense.js';
 import { extractPairs, optionsFromSchema, scoreCatalog } from '../sources.js';
 import { EVENT_LABELS, describeEvent } from '../dashboard/labels.js';
 import { readFileSync } from 'node:fs';
@@ -1265,6 +1266,68 @@ export function createApi({ db, config, fetchImpl }) {
   // resolved this says whether the customer actually answers and what it
   // carries — rather than leaving "the customer did not answer" as the only
   // thing anybody can see.
+  // Tries a candidate key against one record, without adopting it.
+  //
+  // The question "would a key created under a different user see more?" has
+  // no answer short of trying, and trying must not mean swapping the live
+  // credentials first: a wrong guess would then stop every notification
+  // while somebody works out how to put the old ones back.
+  //
+  // The credentials arrive in the body, are used for exactly these two reads,
+  // and are never stored, never logged, and never echoed back.
+  route('POST', /^\/api\/crm\/probe$/, async request => {
+    const body = await readJsonBody(request);
+
+    const clientId = String(body.clientId ?? '').trim();
+    const clientSecret = String(body.clientSecret ?? '').trim();
+    const leadId = String(body.leadId ?? '').trim();
+    const customerId = String(body.customerId ?? '').trim();
+
+    if (!clientId || !clientSecret || !(leadId || customerId)) {
+      return { status: 400, body: { error:
+        'Send {"clientId": "...", "clientSecret": "...", "leadId": "..."}.' } };
+    }
+
+    // A client of its own, with no cool-off attached: this is a deliberate
+    // one-off test, and it must neither read the live key's cool-off nor
+    // write one that would stall the real sender.
+    const client = new SurenseClient({
+      ...config.surense, clientId, clientSecret, fetchImpl
+    });
+
+    const result = { identity: null, scope: null, lead: null, customer: null };
+
+    try {
+      const { token, scope } = await client.authenticate();
+      result.scope = scope ?? tokenScopes(token);
+      result.identity = tokenIdentity(token);
+    } catch (error) {
+      return { authenticated: false, error: error.message, hint: error.hint ?? null };
+    }
+
+    const tryRead = async (what, fn) => {
+      try {
+        await fn();
+        return { readable: true };
+      } catch (error) {
+        return {
+          readable: false,
+          error: error.message,
+          crmSaid: error.body ?? null,
+          forbidden: isForbiddenRecord(error)
+        };
+      }
+    };
+
+    if (leadId) result.lead = await tryRead('lead', () => client.fetchLeadById(leadId));
+
+    if (customerId) {
+      result.customer = await tryRead('customer', () => client.fetchCustomerById(customerId));
+    }
+
+    return { authenticated: true, ...result };
+  });
+
   route('GET', /^\/api\/crm\/customer\/([^/]+)$/, async (_request, params) => {
     const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const customerId = decodeURIComponent(params[0]);
