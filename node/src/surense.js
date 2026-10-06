@@ -628,6 +628,54 @@ export function extractRows(parsed) {
  * @param {string} token
  * @returns {?string}
  */
+/**
+ * Who the token says it is.
+ *
+ * The question a refusal raises first: a key created under one user carries
+ * that user's permissions, and the CRM's own screen does not say which user
+ * a key belongs to. If the key is not the owner's, "the owner can see
+ * everything" is simply about somebody else.
+ *
+ * Identity claims only, never the token and never the secret. The names vary
+ * by issuer, so every plausible spelling is read and whatever is present is
+ * reported.
+ *
+ * @param {string} token
+ * @returns {?object}
+ */
+export function tokenIdentity(token) {
+  try {
+    const parts = String(token).split('.');
+    if (parts.length !== 3) return null;
+
+    const claims = JSON.parse(
+      Buffer.from(parts[1], 'base64url').toString('utf8'));
+
+    const wanted = [
+      'sub', 'userId', 'user_id', 'uid', 'nameid', 'name', 'userName',
+      'user_name', 'given_name', 'email', 'upn', 'role', 'roles',
+      'tenantId', 'tenant_id', 'agencyId', 'agency_id', 'client_id', 'azp'
+    ];
+
+    const found = {};
+    for (const key of Object.keys(claims)) {
+      // Claim names are often namespaced URLs ending in the plain name.
+      const plain = key.split('/').pop();
+      if (wanted.includes(key) || wanted.includes(plain)) {
+        found[plain] = claims[key];
+      }
+    }
+
+    // Every claim name present, so a user id hiding under an unexpected one
+    // is visible rather than silently dropped.
+    found.allClaimNames = Object.keys(claims);
+
+    return found;
+  } catch {
+    return null;
+  }
+}
+
 export function tokenScopes(token) {
   try {
     const parts = String(token).split('.');

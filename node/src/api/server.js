@@ -18,7 +18,7 @@ import { SEED_TEMPLATES, MUTED_STATUSES } from '../notify/seeds.js';
 import { verifySvixSignature, readSignatureHeaders } from './svix.js';
 import { recordDelivery } from '../webhook/lead-updated.js';
 import { normalizeText } from '../mirror.js';
-import { SurenseClient, tokenScopes } from '../surense.js';
+import { SurenseClient, tokenScopes, tokenIdentity } from '../surense.js';
 import { extractPairs, optionsFromSchema, scoreCatalog } from '../sources.js';
 import { EVENT_LABELS, describeEvent } from '../dashboard/labels.js';
 import { readFileSync } from 'node:fs';
@@ -1176,6 +1176,12 @@ export function createApi({ db, config, fetchImpl }) {
 
       auth = {
         ok: true,
+
+        // Which user this key acts as. A key created under one user carries
+        // that user's permissions, and nothing in the CRM's own screens says
+        // which user a key belongs to — so a refusal that looks impossible
+        // ("the owner can see everything") is answered here.
+        identity: tokenIdentity(token),
         // The scope the token really carries, which is not always the scope
         // that was granted in the CRM's own UI — that gap is exactly what a
         // 403 on a new endpoint turns out to be.
