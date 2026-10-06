@@ -249,7 +249,11 @@ export const DELIVERY_LABELS = {
   // 'superseded' state, which speaks in the past.
   'a-newer-status-was-sent-instead': 'יישלח במקומו הסטטוס העדכני',
   'recipient-inactive': 'הנמען מושבת',
-  'recipient-has-no-address': 'לנמען אין כתובת'
+  'recipient-has-no-address': 'לנמען אין כתובת',
+
+  // What the CRM itself answers, so the screen says the same thing Surense
+  // does: this key's user has no permission for that customer.
+  'crm-record-forbidden': 'אין הרשאה ב-CRM לליד או ללקוח הזה'
 };
 
 /** @param {string} reason */
@@ -292,7 +296,8 @@ export const SOURCE_STATE_LABELS = {
   pending: 'בבדיקה',
   resolved: 'נמצא',
   absent: 'אין מקור לליד',
-  failed: 'החיפוש נכשל'
+  failed: 'החיפוש נכשל',
+  blocked: 'אין הרשאה ב-CRM'
 };
 
 /**

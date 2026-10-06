@@ -1242,10 +1242,29 @@ export class Database {
     const { rows: [{ count }] } = await this.pool.query(
       `SELECT count(*)::int AS count
          FROM status_events
-        WHERE source_state <> 'resolved'
+        WHERE source_state NOT IN ('resolved', 'blocked')
           AND notified_at IS NULL
           AND enrich_attempts >= $1`,
       [maxAttempts]);
+
+    return count;
+  }
+
+  /**
+   * Events the CRM will not show us at all.
+   *
+   * Separate from `stuck` because the two ask for different things. A stuck
+   * event ran out of attempts and a retry may well fix it; a blocked one was
+   * answered — this key's user may not see that customer — and nothing here
+   * changes that. Only a permission granted inside Surense does.
+   *
+   * @returns {Promise<number>}
+   */
+  async blockedCount() {
+    const { rows: [{ count }] } = await this.pool.query(
+      `SELECT count(*)::int AS count
+         FROM status_events
+        WHERE source_state = 'blocked' AND notified_at IS NULL`);
 
     return count;
   }
@@ -1259,6 +1278,10 @@ export class Database {
    * Explicit rather than automatic: it is a decision that something has
    * changed, and the code cannot know that on its own.
    *
+   * Blocked rows come back regardless of how many attempts they spent: the
+   * reason to call this at all is that something changed, and a permission
+   * granted in Surense is exactly that kind of change.
+   *
    * Sent events are untouched: their message is gone and no lookup changes it.
    *
    * @param {number} [maxAttempts]
@@ -1271,7 +1294,7 @@ export class Database {
               source_state = 'pending'
         WHERE source_state <> 'resolved'
           AND notified_at IS NULL
-          AND enrich_attempts >= $1`,
+          AND (enrich_attempts >= $1 OR source_state = 'blocked')`,
       [maxAttempts]);
 
     return rowCount;

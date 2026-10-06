@@ -368,6 +368,13 @@ export function createApi({ db, config, fetchImpl }) {
       // looks, since nowhere else would have shown them at all.
       stuck: await db.exhaustedCount(),
 
+      // Events the CRM refuses outright: this key's user may not see that
+      // customer, so there is no lookup left to try. Named apart from
+      // `stuck` because the fix is a permission inside Surense, and reporting
+      // the two as one number asks the reader to retry something that cannot
+      // work and hides the thing that can.
+      blocked: await db.blockedCount(),
+
       // The alarm that needs no theory about the fault. Every other check
       // here recognises a specific failure, and the one that actually
       // happened was recognised by none of them — so this says only when

@@ -26,6 +26,11 @@ export const SKIP = {
   // lived on separate branches. Same string; kept so existing callers and
   // stored reports do not silently stop matching.
   unmappedSource: 'source-id-not-mapped',
+  // The CRM will not show us the lead or the customer behind this event:
+  // this key's user has no permission for that record. Its own reason
+  // because it is the only one here that nothing in this service can fix.
+  blockedRecord: 'crm-record-forbidden',
+
   noRecipient: 'source-not-in-recipients',
   recipientOff: 'recipient-inactive',
   noAddress: 'recipient-has-no-address',
@@ -336,6 +341,8 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     if (!template.active) { skip(SKIP.templateOff); continue; }
 
     if (event.source_state === 'absent') { skip(SKIP.noSource); continue; }
+
+    if (event.source_state === 'blocked') { skip(SKIP.blockedRecord); continue; }
 
     if (event.source_state !== 'resolved' || !event.source_name) {
       // Distinguishing "not looked up yet" from "looked up, no such source"

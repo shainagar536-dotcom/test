@@ -69,7 +69,7 @@ const DELIVERY = {
 /** A CRM that answers the two calls enrichment makes, and counts them. */
 function fakeCrm({ sourceId = SOURCE, catalog = [{ id: SOURCE, title: SOURCE_TITLE }],
   failLead = false, failCatalog = false, leadStatus = 503,
-  customer = null } = {}) {
+  customer = null, forbidden = false } = {}) {
   const calls = { token: 0, lead: 0, catalog: 0, fields: 0, customer: 0 };
 
   const client = new SurenseClient({
@@ -96,6 +96,15 @@ function fakeCrm({ sourceId = SOURCE, catalog = [{ id: SOURCE, title: SOURCE_TIT
       // One customer by id — the fallback route to the referring source.
       if (/\/customers\/[^/]+$/.test(path)) {
         calls.customer++;
+
+        // Verbatim what Surense answers for a customer this key may not see.
+        if (forbidden) {
+          return json({
+            error: { code: 40000, message: 'אינך מורשה לצפות או לבצע פעולות על לקוח זה' },
+            statusCode: 400
+          }, 400);
+        }
+
         if (!customer) return json({ error: 'no such customer' }, 400);
         return json(customer);
       }
@@ -2484,3 +2493,105 @@ test('customer ids are recovered from deliveries already stored', async () => {
   // And again changes nothing: it only ever touches rows still empty.
   assert.equal(await db.linkCustomerIds(), 0);
 });
+
+// ------------------------------------------- a record the CRM will not show
+//
+// The hundred and one stuck events turned out not to be a lookup that kept
+// failing. The CRM was answering, plainly: "אינך מורשה לצפות או לבצע פעולות
+// על לקוח זה" — this key's user may not see that customer. Reading that as a
+// retryable failure had every one of them asking the same forbidden question
+// every hour, while the notification was never going to go out.
+
+test('a record the CRM refuses is settled, not retried hourly', async () => {
+  const { client, calls } = fakeCrm({
+    failLead: true, leadStatus: 400, forbidden: true
+  });
+
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+    statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+  });
+
+  const summary = await enrichPending({ db, client, config });
+
+  assert.equal(summary.blocked, 1);
+  assert.equal(summary.failed, 0, 'a refusal is an answer, not a failure');
+
+  const [event] = await db.listStatusEvents({ ids: [id] });
+  assert.equal(event.source_state, 'blocked');
+  assert.match(event.source_error, /אינך מורשה/);
+
+  // And it is not asked again: the next pass does not even see it.
+  const asked = calls.customer;
+  const second = await enrichPending({ db, client, config });
+
+  assert.equal(second.processed, 0);
+  assert.equal(calls.customer, asked, 'the CRM was not asked a second time');
+});
+
+test('a blocked event is counted apart from one that ran out of attempts',
+  async () => {
+    await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    const { client } = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+    await enrichPending({ db, client, config });
+
+    const body = await (await call('/api/outbox')).json();
+
+    // The two numbers ask for different things: `stuck` asks for a retry,
+    // `blocked` asks for a permission in Surense. One number for both would
+    // tell the reader to do the thing that cannot work.
+    assert.equal(body.blocked, 1);
+    assert.equal(body.stuck, 0);
+  });
+
+test('the screen says what the CRM said, not "the search failed"', async () => {
+  const { client } = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+  await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, customerName: 'אלון ברמן',
+    statusBefore: 'חדש', statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+  });
+
+  await enrichPending({ db, client, config });
+
+  const { skipped } = buildEventOutbox({
+    events: await db.listStatusEvents({ pendingOnly: true }),
+    templates: new Map([[normalizeText('לא ענה'),
+      { status: 'לא ענה', message: 'הליד לא ענה', active: true }]]),
+    recipients: new Map(),
+    messaging: config.messaging
+  });
+
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].reason, SKIP.blockedRecord);
+  assert.equal(DELIVERY_LABELS_FOR_TEST[skipped[0].reason],
+    'אין הרשאה ב-CRM לליד או ללקוח הזה');
+});
+
+test('a permission granted in Surense brings the blocked events back',
+  async () => {
+    const refusing = fakeCrm({ failLead: true, leadStatus: 400, forbidden: true });
+
+    const { id } = await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    await enrichPending({ db, client: refusing.client, config });
+
+    // Terminal is not permanent. The retry is the deliberate act that says
+    // something changed — and a permission is exactly that kind of change.
+    assert.equal(await db.reviveExhausted(), 1);
+
+    await db.upsertSources([{ id: SOURCE, name: SOURCE_TITLE }], 'crm');
+    const working = fakeCrm();
+    await enrichPending({ db, client: working.client, config });
+
+    const [event] = await db.listStatusEvents({ ids: [id] });
+    assert.equal(event.source_state, 'resolved');
+    assert.equal(event.source_name, SOURCE_TITLE);
+  });

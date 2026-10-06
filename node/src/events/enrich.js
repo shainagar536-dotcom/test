@@ -12,14 +12,21 @@
  */
 
 import { resolveSourceName } from '../sources.js';
-import { isOutage } from '../surense.js';
+import { isOutage, isForbiddenRecord } from '../surense.js';
 
 /** How the source of an event ended up. */
 export const SOURCE_STATE = {
   pending: 'pending',
   resolved: 'resolved',
   absent: 'absent',
-  failed: 'failed'
+  failed: 'failed',
+
+  // The CRM says this key's user may not see this record. Terminal, unlike
+  // 'failed': no retry can change a permission, and treating it as retryable
+  // had a hundred events asking the same forbidden question every hour while
+  // their notifications were never going to go out. Only a permission granted
+  // in Surense, followed by an explicit retry, moves these.
+  blocked: 'blocked'
 };
 
 /**
@@ -113,12 +120,13 @@ export async function readConfiguredValue(lead, client, name) {
  * naming the status and the customer is worth incomparably more than no
  * message, and the wordings that quote an amount hold themselves back.
  *
- * Returns null rather than a patch when it cannot answer, so the caller
- * reports the original lead failure — the one that actually explains the row.
+ * Answers with the patch when it can, and otherwise with why not: a refusal
+ * on permission grounds settles the row, where anything else leaves the
+ * original lead failure standing as the reason — that is what explains it.
  *
  * @param {object} event     A status_events row.
  * @param {import('../surense.js').SurenseClient} client
- * @returns {Promise<?object>} a patch, or null
+ * @returns {Promise<?{patch?: object, forbidden?: boolean, error?: ?Error}>}
  */
 export async function sourceFromCustomer(event, client) {
   const customerId = String(event?.customer_id ?? '').trim();
@@ -128,23 +136,27 @@ export async function sourceFromCustomer(event, client) {
 
   try {
     customer = await client.fetchCustomerById(customerId);
-  } catch {
-    return null;
+  } catch (error) {
+    // Passed back rather than swallowed: "you may not see this customer" is
+    // the one refusal that settles the row instead of postponing it.
+    return { forbidden: isForbiddenRecord(error), error };
   }
 
   const sourceId = String(customer?.sourceId ?? '').trim();
   const sourceName = String(customer?.sourceName ?? '').trim();
 
-  if (!sourceName) return null;
+  if (!sourceName) return { forbidden: false, error: null };
 
   return {
-    sourceId,
-    sourceName,
-    sourceState: SOURCE_STATE.resolved,
-    sourceError: '',
-    // Recorded so a row resolved this way is never mistaken for one the lead
-    // answered: it carries no assignee and no amount, by nature.
-    viaCustomer: true
+    patch: {
+      sourceId,
+      sourceName,
+      sourceState: SOURCE_STATE.resolved,
+      sourceError: '',
+      // Recorded so a row resolved this way is never mistaken for one the
+      // lead answered: it carries no assignee and no amount, by nature.
+      viaCustomer: true
+    }
   };
 }
 
@@ -191,7 +203,23 @@ export async function enrichEvent({
     // and an event sitting stuck forever with money in its wording.
     const viaCustomer = await sourceFromCustomer(event, client);
 
-    if (viaCustomer) return viaCustomer;
+    if (viaCustomer?.patch) return viaCustomer.patch;
+
+    // The CRM has told us, about one of the two records, that this key's user
+    // may not see it. That is not a lookup that failed — it is an answer, and
+    // the only thing that changes it is a permission granted in Surense. So
+    // the row stops asking: 'blocked' is terminal and the retry pass skips
+    // it, where 'failed' had it re-asking the same forbidden question hourly
+    // until it quietly ran out of attempts.
+    if (isForbiddenRecord(error) || viaCustomer?.forbidden) {
+      return {
+        sourceState: SOURCE_STATE.blocked,
+        sourceError: 'the CRM refuses this record to our key: ' +
+          'אינך מורשה לצפות או לבצע פעולות על לקוח זה — ' +
+          'the integration user needs permission for this customer in Surense',
+        outage: false
+      };
+    }
 
     // The lead cannot be read and the customer did not answer either. Still
     // 'failed' rather than 'absent': nothing here established that the lead
@@ -366,6 +394,11 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
     // that climbs says leads are disappearing from under us.
     customerIdsLinked: linked, viaCustomer: 0,
 
+    // Rows settled as 'blocked': the CRM will not show us that record at all.
+    // Counted because it is the one failure a retry cannot touch, and the
+    // fix is a permission inside Surense rather than anything here.
+    blocked: 0,
+
     // Set when the CRM itself is the problem. Named rather than folded into
     // `failed`, because the two need opposite responses: a failed row is a
     // question about that lead, an outage is a question for whoever runs the
@@ -415,6 +448,7 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
     if (patch.sourceState === SOURCE_STATE.resolved) summary.resolved++;
     if (patch.sourceState === SOURCE_STATE.failed) summary.failed++;
     if (patch.sourceState === SOURCE_STATE.absent) summary.absent++;
+    if (patch.sourceState === SOURCE_STATE.blocked) summary.blocked++;
     if (patch.viaCustomer) summary.viaCustomer++;
   }
 

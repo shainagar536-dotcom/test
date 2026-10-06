@@ -66,6 +66,31 @@ export function isOutage(error) {
     .test(String(error.message ?? ''));
 }
 
+/**
+ * Whether the CRM refused this particular record on permission grounds.
+ *
+ * Distinct from every other refusal because it is final. The CRM answers
+ * HTTP 400 with code 40000 and "אינך מורשה לצפות או לבצע פעולות על לקוח זה" —
+ * this key's user may not see this customer. No retry changes that; only a
+ * permission granted inside Surense does. Reading it as an ordinary failure
+ * is what had a hundred events asking the same forbidden question every hour.
+ *
+ * @param {?Error} error
+ * @returns {boolean}
+ */
+export function isForbiddenRecord(error) {
+  if (!error) return false;
+  if (Number(error.status ?? 0) !== 400) return false;
+
+  const text = String(error.body ?? '');
+
+  // The CRM's own code, and its wording in case the code ever moves. Matched
+  // on the Hebrew because that is what it actually sends.
+  return /"code"\s*:\s*40000/.test(text) ||
+    /אינך מורשה/.test(text) ||
+    /not authori[sz]ed|unauthorized|no permission/i.test(text);
+}
+
 export class SurenseClient {
   /**
    * @param {object} options
@@ -381,6 +406,7 @@ export class SurenseClient {
     // everyone read as one lead that could not be read — and every remaining
     // event in the batch went on to ask the same failing service again.
     let worst = 0;
+    const bodies = [];
 
     for (const attempt of attempts) {
       try {
@@ -404,6 +430,7 @@ export class SurenseClient {
         return found;
       } catch (error) {
         failures.push(`${attempt.kind}: ${error.message}`);
+        if (error.body) bodies.push(String(error.body));
 
         // A refusal that is about the service outranks one about this lead:
         // 503 beats 400, however the attempts happened to be ordered.
@@ -418,6 +445,10 @@ export class SurenseClient {
       `Could not read lead ${leadId}.\n  ${failures.join('\n  ')}`,
       {
         status: worst || undefined,
+        // What the CRM said, not only that it said no. A 400 meaning "you may
+        // not see this record" is final where every other 400 is not, and the
+        // joined message alone cannot carry that.
+        body: bodies.join('\n').slice(0, 500),
         hint: 'Check that this client may read a single lead.'
       });
   }
