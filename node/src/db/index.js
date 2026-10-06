@@ -1873,12 +1873,25 @@ export class Database {
    * checking whether a webhook arrived at all would otherwise see an empty
    * list and conclude it never came.
    */
-  async listWebhookEvents({ pendingOnly = false, limit = 100 } = {}) {
+  async listWebhookEvents({ pendingOnly = false, limit = 100, leadId = '' } = {}) {
+    const where = [];
+    const params = [Math.min(limit, 500)];
+
+    if (pendingOnly) where.push('processed_at IS NULL');
+
+    // One lead's own deliveries. Without this the only way to see what
+    // arrived for a particular lead is to page the whole table, and the
+    // deliveries that explain a problem are rarely the oldest ones.
+    if (leadId) {
+      params.push(leadId);
+      where.push(`payload->>'leadId' = $${params.length}`);
+    }
+
     const { rows } = await this.pool.query(
       `SELECT * FROM webhook_events
-        ${pendingOnly ? 'WHERE processed_at IS NULL' : ''}
-        ORDER BY received_at ASC LIMIT $1`,
-      [Math.min(limit, 500)]);
+        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+        ORDER BY received_at ${leadId ? 'DESC' : 'ASC'} LIMIT $1`,
+      params);
 
     return rows;
   }

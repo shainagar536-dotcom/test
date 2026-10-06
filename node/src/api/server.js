@@ -2029,6 +2029,7 @@ export function createApi({ db, config, fetchImpl }) {
   route('GET', /^\/api\/webhooks$/, async (_request, _params, url) =>
     ({ events: await db.listWebhookEvents({
       pendingOnly: url.searchParams.get('pending') === 'true',
+      leadId: url.searchParams.get('lead') ?? '',
       limit: Number(url.searchParams.get('limit') ?? 100)
     }) }));
 
