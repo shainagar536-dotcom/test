@@ -153,6 +153,10 @@ export function interpretDelivery(payload) {
     leadNumber: pick(payload, ['leadNumber', 'number']) != null
       ? String(pick(payload, ['leadNumber', 'number'])) : null,
     clientName: clientName || null,
+    // Not needed to send, but needed when the lead cannot be read: the
+    // customer record is the only other place the referring source lives.
+    customerId: pick(payload, ['customerId', 'clientId', 'customer_id']) != null
+      ? String(pick(payload, ['customerId', 'clientId', 'customer_id'])) : null,
     statusBefore: statusBefore === null ? null : String(statusBefore),
     statusAfter: statusMoved ? String(statusAfter) : null,
     otherChanges,
@@ -196,6 +200,7 @@ export async function recordDelivery({ db, payload, client, config }) {
     leadId: event.leadId,
     leadNumber: event.leadNumber ?? '',
     customerName: event.clientName ?? '',
+    customerId: event.customerId ?? '',
     statusBefore: event.statusBefore ?? '',
     statusAfter: event.statusAfter,
     occurredAt: event.occurredAt

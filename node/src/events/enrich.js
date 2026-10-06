@@ -105,6 +105,50 @@ export async function readConfiguredValue(lead, client, name) {
 }
 
 /**
+ * The referring source read off the customer rather than the lead.
+ *
+ * A customer record names the source in full — `sourceId` and `sourceName`
+ * both — so unlike a lead it needs no catalog lookup to be useful. The
+ * assignee and the amount are not there, and that is accepted: a message
+ * naming the status and the customer is worth incomparably more than no
+ * message, and the wordings that quote an amount hold themselves back.
+ *
+ * Returns null rather than a patch when it cannot answer, so the caller
+ * reports the original lead failure — the one that actually explains the row.
+ *
+ * @param {object} event     A status_events row.
+ * @param {import('../surense.js').SurenseClient} client
+ * @returns {Promise<?object>} a patch, or null
+ */
+export async function sourceFromCustomer(event, client) {
+  const customerId = String(event?.customer_id ?? '').trim();
+  if (!customerId) return null;
+
+  let customer;
+
+  try {
+    customer = await client.fetchCustomerById(customerId);
+  } catch {
+    return null;
+  }
+
+  const sourceId = String(customer?.sourceId ?? '').trim();
+  const sourceName = String(customer?.sourceName ?? '').trim();
+
+  if (!sourceName) return null;
+
+  return {
+    sourceId,
+    sourceName,
+    sourceState: SOURCE_STATE.resolved,
+    sourceError: '',
+    // Recorded so a row resolved this way is never mistaken for one the lead
+    // answered: it carries no assignee and no amount, by nature.
+    viaCustomer: true
+  };
+}
+
+/**
  * Enriches one recorded event.
  *
  * Returns the patch rather than writing it, so the decision is testable
@@ -128,17 +172,34 @@ export async function enrichEvent({
   try {
     lead = await client.fetchLeadById(event.lead_id);
   } catch (error) {
-    // The CRM is the only place this answer lives, so a failure here is worth
-    // retrying rather than recording as "this lead has no source".
+    // Says whether the CRM refused everyone or only this lead. The caller
+    // stops the batch on the first of these: the next twenty-four lookups
+    // would ask the same question of the same unavailable service, and
+    // against a 429 that is not a retry but the cause.
+    if (isOutage(error)) {
+      return {
+        sourceState: SOURCE_STATE.failed,
+        sourceError: `lead lookup failed: ${error.message}`,
+        outage: true
+      };
+    }
+
+    // This one lead is unreadable while the CRM is fine — deleted, merged, or
+    // outside what this client may see. Retrying the lead will never answer,
+    // so ask the customer instead: that record carries the referring source
+    // outright, and this is the difference between a notification arriving
+    // and an event sitting stuck forever with money in its wording.
+    const viaCustomer = await sourceFromCustomer(event, client);
+
+    if (viaCustomer) return viaCustomer;
+
+    // The lead cannot be read and the customer did not answer either. Still
+    // 'failed' rather than 'absent': nothing here established that the lead
+    // has no source, only that we could not find out.
     return {
       sourceState: SOURCE_STATE.failed,
       sourceError: `lead lookup failed: ${error.message}`,
-
-      // Says whether the CRM refused everyone or only this lead. The caller
-      // stops the batch on the first of these: the next twenty-four lookups
-      // would ask the same question of the same unavailable service, and
-      // against a 429 that is not a retry but the cause.
-      outage: isOutage(error)
+      outage: false
     };
   }
 
@@ -289,10 +350,21 @@ export async function backfillAmounts({ db, client, config, limit = 50 }) {
  *                    absent: number, catalogRefreshed: boolean}>}
  */
 export async function enrichPending({ db, client, config, limit = 25 }) {
+  // Before asking the CRM anything: fill in customer ids we already hold.
+  // The fallback below needs them, and they were in the stored deliveries all
+  // along. Pure SQL, no request, and a no-op once nothing is missing.
+  const linked = await db.linkCustomerIds?.() ?? 0;
+
   const events = await db.pendingEnrichment({ limit });
 
   const summary = {
     processed: 0, resolved: 0, failed: 0, absent: 0, catalogRefreshed: false,
+
+    // Customer ids recovered from stored deliveries, and events that resolved
+    // off the customer because their lead could not be read. Reported
+    // separately: those rows carry no assignee and no amount, and a count
+    // that climbs says leads are disappearing from under us.
+    customerIdsLinked: linked, viaCustomer: 0,
 
     // Set when the CRM itself is the problem. Named rather than folded into
     // `failed`, because the two need opposite responses: a failed row is a
@@ -343,6 +415,7 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
     if (patch.sourceState === SOURCE_STATE.resolved) summary.resolved++;
     if (patch.sourceState === SOURCE_STATE.failed) summary.failed++;
     if (patch.sourceState === SOURCE_STATE.absent) summary.absent++;
+    if (patch.viaCustomer) summary.viaCustomer++;
   }
 
   return summary;

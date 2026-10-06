@@ -375,6 +375,13 @@ export class SurenseClient {
 
     const failures = [];
 
+    // Kept so the joined error can still say what the CRM answered. Without
+    // this the status was lost: both attempts could come back 503 and the
+    // single error thrown below carried none, so a CRM that was refusing
+    // everyone read as one lead that could not be read — and every remaining
+    // event in the batch went on to ask the same failing service again.
+    let worst = 0;
+
     for (const attempt of attempts) {
       try {
         const lead = attempt.kind === 'get'
@@ -397,12 +404,56 @@ export class SurenseClient {
         return found;
       } catch (error) {
         failures.push(`${attempt.kind}: ${error.message}`);
+
+        // A refusal that is about the service outranks one about this lead:
+        // 503 beats 400, however the attempts happened to be ordered.
+        const status = Number(error.status ?? 0);
+        if (status === 429 || status === 408 || status === 401 ||
+            status === 403 || status >= 500) worst = status;
+        else if (!worst) worst = status;
       }
     }
 
     throw new SurenseError(
       `Could not read lead ${leadId}.\n  ${failures.join('\n  ')}`,
-      { hint: 'Check that this client may read a single lead.' });
+      {
+        status: worst || undefined,
+        hint: 'Check that this client may read a single lead.'
+      });
+  }
+
+  /**
+   * One customer, by its id.
+   *
+   * The second route to the referring source, and the reason the webhook's
+   * `customerId` is stored. A lead that the CRM will not return — deleted,
+   * merged, or outside what this client may read — answers HTTP 400 on every
+   * attempt, and the event behind it can never learn who to tell. The
+   * customer record carries both `sourceId` and `sourceName`, so it answers
+   * the question outright and needs no catalog.
+   *
+   * Used only as a fallback: the lead is the better answer when it exists,
+   * because it also carries the assignee and the amount.
+   *
+   * @param {string} customerId
+   * @returns {Promise<?object>}
+   */
+  async fetchCustomerById(customerId) {
+    await this.resolveBase();
+
+    const customer = await this.request(
+      'GET', `/customers/${encodeURIComponent(customerId)}`);
+
+    // Same shape question as the leads: some calls wrap the record in
+    // `fields`, and a reply about a different customer is not an answer.
+    const found = customer?.fields ?? customer;
+    if (!found || (found.id && String(found.id) !== String(customerId))) {
+      throw new SurenseError(
+        `Customer ${customerId} was not returned by the CRM`,
+        { hint: 'Check that this client may read a single customer.' });
+    }
+
+    return found;
   }
 
   /**

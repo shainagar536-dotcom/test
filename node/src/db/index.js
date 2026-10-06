@@ -1025,9 +1025,10 @@ export class Database {
   async recordStatusEvent(event) {
     const { rows } = await this.pool.query(
       `INSERT INTO status_events
-              (lead_id, lead_number, customer_name, status_before, status_after,
-               assignee_name, source_id, source_name, source_state, occurred_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+              (lead_id, lead_number, customer_name, customer_id, status_before,
+               status_after, assignee_name, source_id, source_name, source_state,
+               occurred_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (lead_id, status_before, status_after, occurred_at)
        DO NOTHING
        RETURNING id`,
@@ -1035,6 +1036,7 @@ export class Database {
         event.leadId,
         event.leadNumber ?? '',
         event.customerName ?? '',
+        event.customerId ?? '',
         event.statusBefore ?? '',
         event.statusAfter ?? '',
         event.assigneeName ?? '',
@@ -1202,6 +1204,38 @@ export class Database {
        VALUES ($1, $2)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
       [CRM_COOLDOWN_KEY, until ? until.toISOString() : '']);
+  }
+
+  /**
+   * Recovers `customer_id` for events recorded before it was stored.
+   *
+   * The id was in the delivery all along — `webhook_events` keeps every
+   * payload verbatim — it simply was not copied onto the row. So this is a
+   * pure read of what we already hold: no CRM call, nothing invented, and
+   * matching on the lead id the same payload carries.
+   *
+   * Only rows that still have no customer id are touched, so it is safe to
+   * run on every pass and costs nothing once there is nothing left to fill.
+   *
+   * @returns {Promise<number>}  rows filled
+   */
+  async linkCustomerIds() {
+    const { rowCount } = await this.pool.query(
+      `UPDATE status_events AS e
+          SET customer_id = w.customer_id
+         FROM (
+           SELECT DISTINCT ON (payload->>'leadId')
+                  payload->>'leadId'     AS lead_id,
+                  payload->>'customerId' AS customer_id
+             FROM webhook_events
+            WHERE payload->>'leadId' IS NOT NULL
+              AND payload->>'customerId' IS NOT NULL
+            ORDER BY payload->>'leadId', received_at DESC
+         ) AS w
+        WHERE e.lead_id = w.lead_id
+          AND e.customer_id = ''`);
+
+    return rowCount;
   }
 
   async exhaustedCount(maxAttempts = 5) {

@@ -68,8 +68,9 @@ const DELIVERY = {
 
 /** A CRM that answers the two calls enrichment makes, and counts them. */
 function fakeCrm({ sourceId = SOURCE, catalog = [{ id: SOURCE, title: SOURCE_TITLE }],
-  failLead = false, failCatalog = false } = {}) {
-  const calls = { token: 0, lead: 0, catalog: 0, fields: 0 };
+  failLead = false, failCatalog = false, leadStatus = 503,
+  customer = null } = {}) {
+  const calls = { token: 0, lead: 0, catalog: 0, fields: 0, customer: 0 };
 
   const client = new SurenseClient({
     ...config.surense,
@@ -92,9 +93,23 @@ function fakeCrm({ sourceId = SOURCE, catalog = [{ id: SOURCE, title: SOURCE_TIT
         return json(catalog);
       }
 
+      // One customer by id — the fallback route to the referring source.
+      if (/\/customers\/[^/]+$/.test(path)) {
+        calls.customer++;
+        if (!customer) return json({ error: 'no such customer' }, 400);
+        return json(customer);
+      }
+
+      if (path.startsWith('https://crm.test/api/v1/leads/') &&
+          (options.method ?? 'GET') === 'GET') {
+        calls.lead++;
+        if (failLead) return json({ error: 'gone' }, leadStatus);
+        return json({ error: 'unexpected single-lead read' }, 404);
+      }
+
       if (path.includes('/leads/search') && options.method === 'POST') {
         calls.lead++;
-        if (failLead) return json({ error: 'down' }, 503);
+        if (failLead) return json({ error: 'down' }, leadStatus);
 
         return json({ rows: [{
           id: LEAD, fullName: 'אלון ברמן', number: '3500',
@@ -229,13 +244,31 @@ test('the event survives a CRM that cannot be reached', async () => {
   assert.equal(outcome.recorded, true);
 
   const [event] = await db.listStatusEvents({});
-  assert.equal(event.source_state, 'failed');
-  assert.match(event.source_error, /lead lookup failed/);
+
+  // Pending, not failed: a 503 is the CRM refusing everyone, and recording
+  // that as this lead's verdict would spend one of its retry attempts on a
+  // judgement that is not about it. The attempt is still unspent.
+  assert.equal(event.source_state, 'pending');
+  assert.equal(event.enrich_attempts, 0);
+  assert.match(outcome.enriched.sourceError, /lead lookup failed/);
   assert.equal(event.customer_name, 'אלון ברמן');
 });
 
+test('one unreadable lead is failed, where a dead CRM is not', async () => {
+  // The distinction the row above depends on: 400 is about this lead and
+  // retrying it is pointless, so it is recorded. Nothing else changes.
+  const { client } = fakeCrm({ failLead: true, leadStatus: 400 });
+
+  await recordDelivery({ db, payload: DELIVERY, client, config });
+
+  const [event] = await db.listStatusEvents({});
+
+  assert.equal(event.source_state, 'failed');
+  assert.match(event.source_error, /lead lookup failed/);
+});
+
 test('a failed lookup is picked up by the enrichment pass afterwards', async () => {
-  const broken = fakeCrm({ failLead: true });
+  const broken = fakeCrm({ failLead: true, leadStatus: 400 });
   await recordDelivery({ db, payload: DELIVERY, client: broken.client, config });
 
   const working = fakeCrm();
@@ -2297,4 +2330,157 @@ test('a date that is not a date is refused rather than stored', async () => {
 
   assert.equal(bad.status, 400);
   assert.equal((await (await call('/api/outbox')).json()).credentialDaysLeft, null);
+});
+
+// ------------------------------- the lead that cannot be read any more
+//
+// About a hundred events sat unsendable with the same reason: the CRM
+// answers HTTP 400 for their lead and always will. Several of them were
+// `טיפול הסתיים - שולם לקוח` — a status that quotes a refund. The webhook
+// carries the customer id, and a customer record names the source outright,
+// so the answer was in reach the whole time.
+
+const CUSTOMER = '5f3c1e62-8b40-4d1e-9a77-2c0e5d9e1a44';
+
+test('a lead the CRM will not return is resolved through its customer',
+  async () => {
+    const { client, calls } = fakeCrm({
+      failLead: true,
+      leadStatus: 400,
+      customer: { id: CUSTOMER, sourceId: SOURCE, sourceName: SOURCE_TITLE }
+    });
+
+    await db.upsertSources([{ id: SOURCE, name: SOURCE_TITLE }], 'crm');
+
+    const { id } = await db.recordStatusEvent({
+      leadId: LEAD,
+      customerId: CUSTOMER,
+      customerName: 'אלון ברמן',
+      statusBefore: 'חדש',
+      statusAfter: 'לא ענה',
+      occurredAt: DELIVERY.date
+    });
+
+    const summary = await enrichPending({ db, client, config });
+
+    assert.equal(summary.outage, null, 'one unreadable lead is not an outage');
+    assert.equal(summary.resolved, 1);
+    assert.equal(summary.viaCustomer, 1, 'and it is reported as the fallback');
+    assert.ok(calls.customer > 0, 'the customer was actually asked');
+
+    const [event] = await db.listStatusEvents({ ids: [id] });
+    assert.equal(event.source_state, SOURCE_STATE.resolved);
+    assert.equal(event.source_name, SOURCE_TITLE);
+    assert.equal(event.source_error, '');
+  });
+
+test('an event resolved through the customer reaches the outbox as a message',
+  async () => {
+    const { client } = fakeCrm({
+      failLead: true,
+      leadStatus: 400,
+      customer: { id: CUSTOMER, sourceId: SOURCE, sourceName: SOURCE_TITLE }
+    });
+
+    await db.upsertSources([{ id: SOURCE, name: SOURCE_TITLE }], 'crm');
+
+    await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, customerName: 'אלון ברמן',
+      statusBefore: 'חדש', statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    await enrichPending({ db, client, config });
+
+    const { ready } = buildEventOutbox({
+      events: await db.listStatusEvents({ pendingOnly: true }),
+      templates: new Map([[normalizeText('לא ענה'),
+        { status: 'לא ענה', message: 'הליד לא ענה', channel: 'email', active: true }]]),
+      recipients: new Map([[normalizeText(SOURCE_TITLE),
+        { sourceName: SOURCE_TITLE, email: 'roi@example.test', channel: 'email',
+          active: true }]]),
+      messaging: config.messaging
+    });
+
+    // The whole point: a notification that was never going to be sent now is.
+    assert.equal(ready.length, 1);
+    assert.equal(ready[0].to, 'roi@example.test');
+  });
+
+test('a customer that does not answer leaves the lead failure as the reason',
+  async () => {
+    // The fallback must not overwrite the explanation with its own. Somebody
+    // reading this row needs to see that the LEAD could not be read.
+    const { client } = fakeCrm({ failLead: true, leadStatus: 400, customer: null });
+
+    const { id } = await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    const summary = await enrichPending({ db, client, config });
+
+    assert.equal(summary.failed, 1);
+    assert.equal(summary.viaCustomer, 0);
+
+    const [event] = await db.listStatusEvents({ ids: [id] });
+    assert.match(event.source_error, /lead lookup failed/);
+    assert.equal(event.source_state, SOURCE_STATE.failed);
+  });
+
+test('a CRM that is down is still an outage, not a reason to ask customers',
+  async () => {
+    // The fallback is for one unreadable lead. A 503 means every lookup will
+    // fail, and asking the customer endpoint twenty-five more times is the
+    // behaviour that once turned a rate limit into an eight-day silence.
+    const { client, calls } = fakeCrm({
+      failLead: true,
+      leadStatus: 503,
+      customer: { id: CUSTOMER, sourceId: SOURCE, sourceName: SOURCE_TITLE }
+    });
+
+    await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    const summary = await enrichPending({ db, client, config });
+
+    assert.ok(summary.outage, 'a 503 is the CRM refusing everyone');
+    assert.equal(calls.customer, 0, 'and nothing else was asked of it');
+  });
+
+test('the customer id is recorded from the delivery, not looked up', async () => {
+  const { client } = fakeCrm();
+
+  await recordDelivery({
+    db,
+    payload: { ...DELIVERY, customerId: CUSTOMER },
+    client,
+    config
+  });
+
+  const [event] = await db.listStatusEvents({ limit: 1 });
+
+  assert.equal(event.customer_id, CUSTOMER);
+});
+
+test('customer ids are recovered from deliveries already stored', async () => {
+  // Every payload is kept verbatim, so the ids for the events recorded before
+  // this column existed were never lost — only uncopied. No CRM call.
+  await db.recordWebhook(
+    'surense', { ...DELIVERY, customerId: CUSTOMER }, 'msg_backfill_1');
+
+  const { id } = await db.recordStatusEvent({
+    leadId: LEAD, statusBefore: 'חדש', statusAfter: 'לא ענה',
+    occurredAt: DELIVERY.date
+  });
+
+  const filled = await db.linkCustomerIds();
+  assert.equal(filled, 1);
+
+  const [event] = await db.listStatusEvents({ ids: [id] });
+  assert.equal(event.customer_id, CUSTOMER);
+
+  // And again changes nothing: it only ever touches rows still empty.
+  assert.equal(await db.linkCustomerIds(), 0);
 });

@@ -212,6 +212,15 @@ CREATE TABLE IF NOT EXISTS status_events (
     lead_number    TEXT        NOT NULL DEFAULT '',
     customer_name  TEXT        NOT NULL DEFAULT '',
 
+    -- The customer the lead belongs to, as the webhook names them.
+    --
+    -- Kept because the lead is not always readable: a lead deleted, merged or
+    -- moved out of this client's reach answers HTTP 400 forever, and the
+    -- event is then stuck with no way to learn who referred it. The customer
+    -- record carries `sourceId` AND `sourceName`, so this one id is a second
+    -- route to the only fact the notification actually needs.
+    customer_id    TEXT        NOT NULL DEFAULT '',
+
     status_before  TEXT        NOT NULL DEFAULT '',
     status_after   TEXT        NOT NULL DEFAULT '',
 
@@ -257,6 +266,8 @@ CREATE TABLE IF NOT EXISTS status_events (
 ALTER TABLE status_events ADD COLUMN IF NOT EXISTS superseded_by BIGINT;
 
 ALTER TABLE status_events ADD COLUMN IF NOT EXISTS amount TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE status_events ADD COLUMN IF NOT EXISTS customer_id TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS status_events_occurred_idx
     ON status_events (occurred_at DESC, id DESC);
