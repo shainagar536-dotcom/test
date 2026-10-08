@@ -70,8 +70,8 @@ const DELIVERY = {
 /** A CRM that answers the two calls enrichment makes, and counts them. */
 function fakeCrm({ sourceId = SOURCE, catalog = [{ id: SOURCE, title: SOURCE_TITLE }],
   failLead = false, failCatalog = false, leadStatus = 503,
-  customer = null, forbidden = false } = {}) {
-  const calls = { token: 0, lead: 0, catalog: 0, fields: 0, customer: 0 };
+  customer = null, forbidden = false, siblings = null } = {}) {
+  const calls = { token: 0, lead: 0, catalog: 0, fields: 0, customer: 0, siblings: 0 };
 
   const client = new SurenseClient({
     ...config.surense,
@@ -118,6 +118,17 @@ function fakeCrm({ sourceId = SOURCE, catalog = [{ id: SOURCE, title: SOURCE_TIT
       }
 
       if (path.includes('/leads/search') && options.method === 'POST') {
+        const sent = JSON.parse(options.body ?? '{}');
+        const byCustomer = (sent.filters ?? [])
+          .some(filter => filter.field === 'customerId');
+
+        // A filtered search returns what the key may see. The refused lead
+        // is not in it; the customer's other leads are.
+        if (byCustomer) {
+          calls.siblings++;
+          return json({ rows: siblings ?? [] });
+        }
+
         calls.lead++;
         if (failLead) return json({ error: 'down' }, leadStatus);
 
@@ -2892,3 +2903,137 @@ test('a lead refused again after being fixed is news again', async () => {
   const again = await (await call('/api/outbox')).json();
   assert.equal(again.newlyBlocked.length, 1);
 });
+
+// ---------------------------------------- the returning customer's old lead
+//
+// The owner's own observation, and the one answer that costs him nothing:
+// most leads he does not own belong to customers who have been here before,
+// and their earlier lead — which he does own — is readable. The referring
+// source is a fact about the customer, not about which lead was opened
+// this year.
+
+test("a refused lead takes its source from the customer's earlier lead",
+  async () => {
+    const { client, calls } = fakeCrm({
+      failLead: true,
+      leadStatus: 400,
+      forbidden: true,
+      siblings: [
+        { id: 'old-1', number: '1180', sourceId: SOURCE, createdDate: '2024-03-01' }
+      ]
+    });
+
+    await db.upsertSources([{ id: SOURCE, name: SOURCE_TITLE }], 'crm');
+
+    const { id } = await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, leadNumber: '3249',
+      customerName: 'שמעון סמילה', statusBefore: 'חדש', statusAfter: 'לא ענה',
+      occurredAt: DELIVERY.date
+    });
+
+    const summary = await enrichPending({ db, client, config });
+
+    assert.equal(summary.resolved, 1);
+    assert.equal(summary.viaSibling, 1);
+    assert.equal(summary.blocked, 0, 'this lead is no longer a dead end');
+    assert.ok(calls.siblings > 0);
+
+    const [event] = await db.listStatusEvents({ ids: [id] });
+    assert.equal(event.source_state, 'resolved');
+    assert.equal(event.source_name, SOURCE_TITLE);
+    assert.equal(event.source_error, '');
+  });
+
+test('with no earlier lead to learn from, the row stays blocked', async () => {
+  // The fallback must not invent an answer when the customer is genuinely
+  // new. Blocked is the honest outcome, and the alarm still names it.
+  const { client } = fakeCrm({
+    failLead: true, leadStatus: 400, forbidden: true, siblings: []
+  });
+
+  await db.recordStatusEvent({
+    leadId: LEAD, customerId: CUSTOMER, leadNumber: '4081',
+    statusBefore: 'חדש', statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+  });
+
+  const summary = await enrichPending({ db, client, config });
+
+  assert.equal(summary.blocked, 1);
+  assert.equal(summary.viaSibling, 0);
+});
+
+test('the newest earlier lead decides, and a disagreement is recorded',
+  async () => {
+    // "A returning customer comes back through the same source; at worst it
+    // is one we could not send to anyway." So this does not hold the message
+    // back — it sends, and leaves the disagreement visible on the row.
+    const other = 'bb11cc22-dd33-4ee4-8f55-66aa77bb88cc';
+
+    const { client } = fakeCrm({
+      failLead: true,
+      leadStatus: 400,
+      forbidden: true,
+      siblings: [
+        { id: 'old-1', number: '900', sourceId: other, createdDate: '2022-01-01' },
+        { id: 'old-2', number: '1180', sourceId: SOURCE, createdDate: '2025-06-01' }
+      ]
+    });
+
+    await db.upsertSources([
+      { id: SOURCE, name: SOURCE_TITLE },
+      { id: other, name: 'חבר מביא חבר' }
+    ], 'crm');
+
+    const { id } = await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'חדש',
+      statusAfter: 'לא ענה', occurredAt: DELIVERY.date
+    });
+
+    await enrichPending({ db, client, config });
+
+    const [event] = await db.listStatusEvents({ ids: [id] });
+
+    assert.equal(event.source_name, SOURCE_TITLE, 'the newest lead decides');
+    assert.match(event.source_error, /2 different sources/);
+  });
+
+test('an inferred source never carries an amount read off another lead',
+  async () => {
+    // The amount lives on the refused lead. A message that quotes it is held
+    // rather than sent with a number belonging to a different lead — the one
+    // thing worse than a late notification is a wrong sum in it.
+    const { client } = fakeCrm({
+      failLead: true,
+      leadStatus: 400,
+      forbidden: true,
+      siblings: [
+        { id: 'old-1', number: '1180', sourceId: SOURCE,
+          createdDate: '2024-03-01', customFields: [], 'סך הכל': '99,999' }
+      ]
+    });
+
+    await db.upsertSources([{ id: SOURCE, name: SOURCE_TITLE }], 'crm');
+
+    const { id } = await db.recordStatusEvent({
+      leadId: LEAD, customerId: CUSTOMER, statusBefore: 'בטיפול',
+      statusAfter: 'הוגש', occurredAt: DELIVERY.date
+    });
+
+    await enrichPending({ db, client, config });
+
+    const [event] = await db.listStatusEvents({ ids: [id] });
+    assert.equal(event.amount, '', 'no amount was taken from the sibling');
+
+    const { ready, skipped } = buildEventOutbox({
+      events: [event],
+      templates: new Map([[normalizeText('הוגש'),
+        { status: 'הוגש', message: 'הוגשו החזרים בסך {total}', active: true }]]),
+      recipients: new Map([[normalizeText(SOURCE_TITLE),
+        { sourceName: SOURCE_TITLE, email: 'roi@example.com', channel: 'email',
+          active: true }]]),
+      messaging: config.messaging
+    });
+
+    assert.equal(ready.length, 0);
+    assert.equal(skipped[0].reason, SKIP.unfilled);
+  });

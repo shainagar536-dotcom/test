@@ -161,6 +161,93 @@ export async function sourceFromCustomer(event, client) {
 }
 
 /**
+ * The referring source taken from the customer's other leads.
+ *
+ * The owner's own observation, and the best answer available: most leads he
+ * does not own belong to returning customers, who already have an earlier
+ * lead that he does own — and that one is readable. The referring source is
+ * a fact about the customer rather than about which lead happened to be
+ * opened this year, so the sibling answers the question the refused lead
+ * cannot.
+ *
+ * A filtered search is what makes it work: it returns only what this key may
+ * see, so the refusal on one lead does not refuse the question about the rest.
+ *
+ * Siblings that disagree are not treated as a problem. "A returning customer
+ * comes back through the same source; at worst it is a source we could not
+ * send to anyway" — so the newest sibling wins and the disagreement is
+ * recorded on the row rather than used to hold the message back.
+ *
+ * What this cannot recover is the amount: it lives on the refused lead, and
+ * the two wordings that quote it stay held rather than go out with a number
+ * read off a different lead.
+ *
+ * @param {object} input
+ * @returns {Promise<?{patch: object}>}
+ */
+export async function sourceFromSiblingLeads({
+  event, client, sourceNames, onUnknownSource
+}) {
+  const customerId = String(event?.customer_id ?? '').trim();
+  if (!customerId) return null;
+
+  let siblings;
+
+  try {
+    siblings = await client.fetchLeadsByCustomer(customerId);
+  } catch {
+    return null;
+  }
+
+  // The refused lead is not among these — the search returns only what the
+  // key may see — but a key that could see it would give it no standing
+  // over its siblings anyway.
+  const dated = siblings
+    .filter(lead => String(lead?.sourceId ?? '').trim())
+    .map(lead => ({
+      sourceId: String(lead.sourceId).trim(),
+      number: lead?.number ?? '',
+      at: new Date(lead?.createdDate ?? 0).getTime() || 0
+    }))
+    .sort((a, b) => b.at - a.at);
+
+  if (!dated.length) return null;
+
+  const distinct = [...new Set(dated.map(row => row.sourceId))];
+  const sourceId = dated[0].sourceId;
+
+  let names = sourceNames;
+  let mapped = names.get(sourceId);
+
+  if (!mapped && onUnknownSource) {
+    try {
+      names = await onUnknownSource();
+      mapped = names.get(sourceId);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!mapped) return null;
+
+  return {
+    patch: {
+      sourceId,
+      sourceName: mapped,
+      sourceState: SOURCE_STATE.resolved,
+      // Empty in the ordinary case. When the customer's leads name more than
+      // one source the row says so, because a person looking at it later
+      // should see that this source was inferred from a sibling and that the
+      // siblings were not unanimous.
+      sourceError: distinct.length > 1
+        ? `source taken from lead ${dated[0].number}; this customer's leads name ${distinct.length} different sources`
+        : '',
+      viaSibling: true
+    }
+  };
+}
+
+/**
  * Enriches one recorded event.
  *
  * Returns the patch rather than writing it, so the decision is testable
@@ -204,6 +291,14 @@ export async function enrichEvent({
     const viaCustomer = await sourceFromCustomer(event, client);
 
     if (viaCustomer?.patch) return viaCustomer.patch;
+
+    // Neither record can be read. The customer's OTHER leads still can be,
+    // and for a returning customer they carry the same referring source.
+    const viaSibling = await sourceFromSiblingLeads({
+      event, client, sourceNames, onUnknownSource
+    });
+
+    if (viaSibling?.patch) return viaSibling.patch;
 
     // The CRM has told us, about one of the two records, that this key's user
     // may not see it. That is not a lookup that failed — it is an answer, and
@@ -465,6 +560,11 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
     // that climbs says leads are disappearing from under us.
     customerIdsLinked: linked, viaCustomer: 0,
 
+    // Resolved from a returning customer's earlier lead, because the one
+    // that moved is refused. Counted apart because these rows carry no
+    // assignee and no amount: both live on the lead nobody can read.
+    viaSibling: 0,
+
     // Rows settled as 'blocked': the CRM will not show us that record at all.
     // Counted because it is the one failure a retry cannot touch, and the
     // fix is a permission inside Surense rather than anything here.
@@ -526,6 +626,7 @@ export async function enrichPending({ db, client, config, limit = 25 }) {
     if (patch.sourceState === SOURCE_STATE.absent) summary.absent++;
     if (patch.sourceState === SOURCE_STATE.blocked) summary.blocked++;
     if (patch.viaCustomer) summary.viaCustomer++;
+    if (patch.viaSibling) summary.viaSibling++;
   }
 
   return summary;
