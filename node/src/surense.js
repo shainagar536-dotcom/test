@@ -50,6 +50,20 @@ function hintFor(status) {
 /** How long a refused key is left alone. Long enough not to earn a 429. */
 const CREDENTIAL_COOLDOWN_MS = 30 * 60 * 1000;
 
+/**
+ * How long to stand down from a 429 that names no Retry-After.
+ *
+ * The header is advisory and this endpoint does not always send it. Writing
+ * nothing in that case looked harmless and was not: the cool-off is what
+ * stops the next caller asking, so without it every run went straight back
+ * to the token endpoint and renewed the rolling window it was waiting out.
+ * A rate limit with no stated deadline is still a rate limit.
+ */
+const RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1000;
+
+/** Nothing the CRM asks for is honoured beyond this. */
+const MAX_COOLDOWN_MS = 60 * 60 * 1000;
+
 export function isOutage(error) {
   if (!error) return false;
 
@@ -169,8 +183,17 @@ export class SurenseClient {
       const retryAfter = response.headers?.get?.('retry-after') ?? null;
 
       // Written down so every later caller honours it too, not only this one.
-      if (response.status === 429 && Number(retryAfter) > 0) {
-        await this.cooldown?.write?.(new Date(Date.now() + Number(retryAfter) * 1000));
+      //
+      // Any 429, with or without a deadline attached. Honouring only the
+      // ones that named a Retry-After left the rest with no cool-off at all,
+      // so the next run asked again and the window never closed — which is
+      // how a rate limit outlives the thing that caused it.
+      if (response.status === 429) {
+        const asked = Number(retryAfter) > 0
+          ? Number(retryAfter) * 1000 : RATE_LIMIT_COOLDOWN_MS;
+
+        await this.cooldown?.write?.(
+          new Date(Date.now() + Math.min(asked, MAX_COOLDOWN_MS)));
       }
 
       // Rejected credentials are the one failure that retrying cannot mend,

@@ -3037,3 +3037,49 @@ test('an inferred source never carries an amount read off another lead',
     assert.equal(ready.length, 0);
     assert.equal(skipped[0].reason, SKIP.unfilled);
   });
+
+test('a rate limit with no deadline still buys silence', async () => {
+  // Retry-After is advisory and this endpoint does not always send it.
+  // Writing no cool-off in that case looked harmless and was not: the
+  // cool-off is what stops the next caller asking, so without it every run
+  // went back to the token endpoint and renewed the window it was waiting
+  // out. A rate limit with no stated deadline is still a rate limit.
+  let tokenCalls = 0;
+
+  const client = new SurenseClient({
+    ...config.surense,
+    cooldown: {
+      read: () => db.crmCooldown(),
+      write: (until) => db.setCrmCooldown(until)
+    },
+    fetchImpl: async (url) => {
+      if (String(url).includes('/oauth/token')) {
+        tokenCalls++;
+        // No Retry-After header at all.
+        return new Response(JSON.stringify({ error: 'slow down' }), { status: 429 });
+      }
+
+      return new Response('{}', { status: 200 });
+    }
+  });
+
+  await assert.rejects(() => client.authenticate());
+  assert.equal(tokenCalls, 1);
+
+  const until = await db.crmCooldown();
+  assert.ok(until, 'a cool-off was written even with no deadline given');
+
+  // A separate client — the next hourly run — must honour it without
+  // asking the CRM anything.
+  const next = new SurenseClient({
+    ...config.surense,
+    cooldown: { read: () => db.crmCooldown(), write: (u) => db.setCrmCooldown(u) },
+    fetchImpl: async (url) => {
+      if (String(url).includes('/oauth/token')) tokenCalls++;
+      return new Response(JSON.stringify({ error: 'slow down' }), { status: 429 });
+    }
+  });
+
+  await assert.rejects(() => next.authenticate());
+  assert.equal(tokenCalls, 1, 'the second run did not touch the token endpoint');
+});
