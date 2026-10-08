@@ -1355,6 +1355,34 @@ export function createApi({ db, config, fetchImpl }) {
     return { authenticated: true, ...result };
   });
 
+  // A customer's other leads, as this key sees them.
+  //
+  // The question behind the returning-customer fallback: when the lead that
+  // just moved is refused, does the CRM still show us its siblings?
+  route('GET', /^\/api\/crm\/customer\/([^/]+)\/leads$/, async (_request, params) => {
+    const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
+    const customerId = decodeURIComponent(params[0]);
+
+    try {
+      const leads = await client.fetchLeadsByCustomer(customerId);
+
+      return {
+        customerId,
+        found: leads.length,
+        leads: leads.map(lead => ({
+          id: lead?.id ?? null,
+          number: lead?.number ?? null,
+          ownerName: lead?.ownerName ?? null,
+          statusName: lead?.statusName ?? null,
+          sourceId: lead?.sourceId ?? null,
+          createdDate: lead?.createdDate ?? null
+        }))
+      };
+    } catch (error) {
+      return { status: 502, body: { error: error.message, crmSaid: error.body ?? null } };
+    }
+  });
+
   route('GET', /^\/api\/crm\/customer\/([^/]+)$/, async (_request, params) => {
     const client = new SurenseClient({ ...config.surense, fetchImpl, cooldown });
     const customerId = decodeURIComponent(params[0]);

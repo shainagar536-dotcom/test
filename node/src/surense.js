@@ -489,6 +489,35 @@ export class SurenseClient {
   }
 
   /**
+   * The customer's other leads — the ones this key is allowed to see.
+   *
+   * A returning customer has history: an earlier lead, usually owned by
+   * whoever first brought them in. When the CRM refuses the lead that just
+   * moved, those siblings are still readable, and they carry the same
+   * `sourceId` — because the referring source is a fact about the customer,
+   * not about which lead happened to be opened this year.
+   *
+   * A filtered search is exactly the right call for this: it returns only
+   * what this key may see, so the refusal that blocks the one lead does not
+   * block the question.
+   *
+   * @param {string} customerId
+   * @param {number} [limit]
+   * @returns {Promise<Array<object>>}
+   */
+  async fetchLeadsByCustomer(customerId, limit = 20) {
+    await this.resolveBase();
+
+    const rows = extractRows(await this.request('POST', '/leads/search', {
+      startRow: 0,
+      endRow: limit,
+      filters: [{ field: 'customerId', operator: 'equals', value: customerId }]
+    }));
+
+    return rows.map(row => row?.fields ?? row).filter(Boolean);
+  }
+
+  /**
    * Looks for a lookup that lists the referring sources by id and name.
    *
    * Which path serves it is genuinely unknown — it is not in the integration
