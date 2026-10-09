@@ -182,18 +182,34 @@ export class SurenseClient {
       // asking somebody.
       const retryAfter = response.headers?.get?.('retry-after') ?? null;
 
+      // What the service says it is, which is not always what the status
+      // code says. This endpoint has answered 401 while throttling — and a
+      // 401 is read here as a dead key, which is the one diagnosis that
+      // sends somebody to replace a credential that was never the problem.
+      // So the body decides when the two disagree.
+      const throttled =
+        /too_many_requests|too many requests|rate.?limit|slow.?down/i.test(body);
+
       // Written down so every later caller honours it too, not only this one.
       //
       // Any 429, with or without a deadline attached. Honouring only the
       // ones that named a Retry-After left the rest with no cool-off at all,
       // so the next run asked again and the window never closed — which is
       // how a rate limit outlives the thing that caused it.
-      if (response.status === 429) {
+      if (response.status === 429 || throttled) {
         const asked = Number(retryAfter) > 0
           ? Number(retryAfter) * 1000 : RATE_LIMIT_COOLDOWN_MS;
 
-        await this.cooldown?.write?.(
-          new Date(Date.now() + Math.min(asked, MAX_COOLDOWN_MS)));
+        const until = new Date(Date.now() + Math.min(asked, MAX_COOLDOWN_MS));
+        await this.cooldown?.write?.(until);
+
+        // Reported as what it is, whatever status it arrived under. A wait
+        // and a revoked key need opposite responses from a person, and
+        // telling them to go and make a new key is not a harmless guess: it
+        // is work, on the wrong thing, during an outage.
+        throw new SurenseError(
+          `Token request failed (HTTP ${response.status}) — the CRM is rate limiting us`,
+          { status: 429, body, retryAfter, hint: hintFor(429) });
       }
 
       // Rejected credentials are the one failure that retrying cannot mend,

@@ -3083,3 +3083,61 @@ test('a rate limit with no deadline still buys silence', async () => {
   await assert.rejects(() => next.authenticate());
   assert.equal(tokenCalls, 1, 'the second run did not touch the token endpoint');
 });
+
+test('a throttle wearing a 401 is a wait, not a dead key', async () => {
+  // Surense's token endpoint has answered 401 while rate limiting, body and
+  // all: {"error":"too_many_requests"}. Read by status alone that is a
+  // revoked key — the one diagnosis that sends somebody to replace a
+  // credential which was never the problem, during an outage, for nothing.
+  let calls = 0;
+
+  const client = new SurenseClient({
+    ...config.surense,
+    cooldown: {
+      read: () => db.crmCooldown(),
+      write: (until) => db.setCrmCooldown(until)
+    },
+    fetchImpl: async (url) => {
+      if (String(url).includes('/oauth/token')) {
+        calls++;
+        return new Response(
+          JSON.stringify({ error: 'too_many_requests',
+            error_description: 'Too many requests. Retry later.' }),
+          { status: 401, headers: { 'retry-after': '600' } });
+      }
+
+      return new Response('{}', { status: 200 });
+    }
+  });
+
+  await assert.rejects(() => client.authenticate(), (error) => {
+    assert.equal(error.status, 429, 'reported as the rate limit it is');
+    assert.match(error.message, /rate limiting/);
+    assert.doesNotMatch(error.message, /Credentials rejected/);
+    return true;
+  });
+
+  // And it honours the window the CRM named, rather than the fixed
+  // half-hour a credential failure would have imposed.
+  const until = await db.crmCooldown();
+  const seconds = Math.round((new Date(until) - Date.now()) / 1000);
+  assert.ok(seconds > 500 && seconds <= 600, `got ${seconds}s`);
+  assert.equal(calls, 1);
+});
+
+test('a 401 that really is a refused key still says so', async () => {
+  // The fix must not blunt the alarm it sits next to: a revoked key going
+  // unnoticed is what cost eight days.
+  const client = new SurenseClient({
+    ...config.surense,
+    cooldown: { read: () => db.crmCooldown(), write: (u) => db.setCrmCooldown(u) },
+    fetchImpl: async () => new Response(
+      JSON.stringify({ error: 'invalid_client' }), { status: 401 })
+  });
+
+  await assert.rejects(() => client.authenticate(), (error) => {
+    assert.match(error.message, /Credentials rejected/);
+    assert.equal(error.status, 401);
+    return true;
+  });
+});
