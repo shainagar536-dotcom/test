@@ -201,9 +201,15 @@ export function createApi({ db, config, fetchImpl }) {
   const messagingNow = async () => {
     const stored = await db.deliverySettings();
 
+    // Settings come back as text; the brake is a number and a string here
+    // would compare as one, releasing everything or nothing.
+    const limit = Number(stored.maxPerRun);
+
     return {
       ...config.messaging,
       ...stored,
+      maxPerRun: Number.isFinite(limit) && limit > 0
+        ? limit : config.messaging.maxPerRun,
 
       // The amount column is nested, so a flat spread would replace the whole
       // column map with one key and quietly lose the other five.
@@ -1610,6 +1616,11 @@ export function createApi({ db, config, fetchImpl }) {
       credentialExpiresAt: stored.credentialExpiresAt || '',
       credentialDaysLeft: await credentialDaysLeft(),
 
+      // How many messages one run may release before the brake holds them
+      // all. On this screen because raising it is what a legitimate backlog
+      // needs, and lowering it is what a bulk edit needs.
+      maxPerRun: effective.maxPerRun,
+
       // Whether a message reaches its source at all — the plain-language
       // form of the same fact, because "redirectAllTo is set" is not how
       // anyone thinks about it.
@@ -1620,6 +1631,7 @@ export function createApi({ db, config, fetchImpl }) {
       source: {
         redirectAllTo: 'redirectAllTo' in stored ? 'dashboard' : 'environment',
         copyTo: 'copyTo' in stored ? 'dashboard' : 'environment',
+        maxPerRun: 'maxPerRun' in stored ? 'dashboard' : 'environment',
         totalColumn: 'totalColumn' in stored ? 'dashboard' : 'environment',
         credentialExpiresAt: 'credentialExpiresAt' in stored ? 'dashboard' : 'unset'
       }
@@ -1669,6 +1681,20 @@ export function createApi({ db, config, fetchImpl }) {
       patch.credentialExpiresAt = when;
     }
 
+    // The flood brake's threshold. Bounded on both sides: zero would hold
+    // every message forever, and a number large enough to be meaningless
+    // removes the brake instead of raising it.
+    if ('maxPerRun' in body) {
+      const limit = Number(body.maxPerRun);
+
+      if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+        return { status: 400, body: { error:
+          'maxPerRun must be a whole number between 1 and 500.' } };
+      }
+
+      patch.maxPerRun = String(limit);
+    }
+
     for (const key of ['redirectAllTo', 'copyTo']) {
       if (patch[key] && !patch[key].includes('@')) {
         return { status: 400, body: { error: `${key} must be an email address.` } };
@@ -1677,8 +1703,8 @@ export function createApi({ db, config, fetchImpl }) {
 
     if (!Object.keys(patch).length) {
       return { status: 400, body: { error:
-        'Nothing to change. Send live, redirectAllTo, copyTo, totalColumn ' +
-      'or credentialExpiresAt.' } };
+        'Nothing to change. Send live, redirectAllTo, copyTo, totalColumn, ' +
+      'credentialExpiresAt or maxPerRun.' } };
     }
 
     await db.saveDeliverySettings(patch);
@@ -1690,6 +1716,7 @@ export function createApi({ db, config, fetchImpl }) {
       redirectAllTo: effective.redirectAllTo || '',
       copyTo: effective.copyTo || '',
       totalColumn: effective.columns.total || '',
+      maxPerRun: effective.maxPerRun,
       credentialDaysLeft: await credentialDaysLeft(),
       live: !effective.redirectAllTo
     };

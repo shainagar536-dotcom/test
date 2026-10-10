@@ -32,7 +32,13 @@ const DELIVERY_KEYS = new Set([
   // is shown once, when the key is created, and then only to whoever made it.
   // Kept here so the service can say it out loud before the day arrives
   // rather than discovering it as an outage.
-  'credentialExpiresAt'
+  'credentialExpiresAt',
+
+  // The flood brake's threshold. It lives here rather than only in the
+  // environment because the one moment it has to move is the moment a
+  // legitimate backlog has built up — after an outage — and that is exactly
+  // when nobody wants the answer to be "redeploy the service".
+  'maxPerRun'
 ]);
 
 /** Where the CRM's own "retry later" deadline is kept. */

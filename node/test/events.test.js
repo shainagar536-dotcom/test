@@ -3141,3 +3141,29 @@ test('a 401 that really is a refused key still says so', async () => {
     return true;
   });
 });
+
+test('the flood brake can be raised without a redeploy', async () => {
+  // The one moment the threshold has to move is after an outage, when a
+  // legitimate backlog has built up — and that is exactly when the answer
+  // must not be "go and edit the environment and redeploy".
+  const saved = await (await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ maxPerRun: 60 })
+  })).json();
+
+  assert.equal(saved.maxPerRun, 60);
+  assert.equal(typeof saved.maxPerRun, 'number', 'a number, not the stored text');
+});
+
+test('a brake set to nonsense is refused, not stored', async () => {
+  for (const value of [0, -5, 'הרבה', 9999, 2.5]) {
+    const answer = await call('/api/settings/delivery', {
+      method: 'PUT', body: JSON.stringify({ maxPerRun: value })
+    });
+
+    assert.equal(answer.status, 400, `accepted ${value}`);
+  }
+
+  // And the default still stands after every refusal.
+  const body = await (await call('/api/settings/delivery')).json();
+  assert.equal(body.maxPerRun, 25);
+});
