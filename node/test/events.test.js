@@ -3167,3 +3167,86 @@ test('a brake set to nonsense is refused, not stored', async () => {
   const body = await (await call('/api/settings/delivery')).json();
   assert.equal(body.maxPerRun, 25);
 });
+
+// ------------------------------------------------- draining a known backlog
+//
+// The brake holds everything when a run queues more than its threshold. For
+// a bulk edit in the CRM that is right. For the backlog an outage leaves
+// behind it is a second outage, and "raise the limit above the backlog" just
+// swaps one failure for the opposite one: a hundred messages at once.
+
+const manyReady = (count) => Array.from({ length: count }, (unused, index) => ({
+  id: index + 1,
+  lead_id: `lead-${index}`,
+  customer_name: `לקוח ${index}`,
+  status_before: 'חדש',
+  status_after: 'לא ענה',
+  source_name: SOURCE_TITLE,
+  source_state: 'resolved',
+  amount: '',
+  occurred_at: new Date(Date.UTC(2026, 9, 1, 0, index)).toISOString()
+}));
+
+const outboxFor = (events, messaging) => buildEventOutbox({
+  events,
+  templates: new Map([[normalizeText('לא ענה'),
+    { status: 'לא ענה', message: 'אין מענה', active: true }]]),
+  recipients: new Map([[normalizeText(SOURCE_TITLE),
+    { sourceName: SOURCE_TITLE, email: 'roi@example.com', channel: 'email',
+      active: true }]]),
+  messaging: { ...config.messaging, ...messaging }
+});
+
+test('a drain releases a runful at a time, oldest first', async () => {
+  const hour = new Date(Date.now() + 3600 * 1000).toISOString();
+
+  const { ready, floodBrake, backlog } = outboxFor(manyReady(127),
+    { maxPerRun: 30, drainUntil: hour });
+
+  assert.equal(floodBrake, null, 'the brake stands aside');
+  assert.equal(ready.length, 30);
+  assert.equal(backlog.total, 127);
+  assert.equal(backlog.remaining, 97);
+
+  // Oldest first: a source waiting since Thursday hears before one whose
+  // lead moved an hour ago.
+  assert.equal(ready[0].customer, 'לקוח 0');
+});
+
+test('the brake comes back on its own when the window passes', async () => {
+  const past = new Date(Date.now() - 60 * 1000).toISOString();
+
+  const { ready, floodBrake } = outboxFor(manyReady(127),
+    { maxPerRun: 30, drainUntil: past });
+
+  // A switch left on quietly removes the protection for every bulk edit
+  // that follows, and nobody notices until the day it matters.
+  assert.equal(ready.length, 0);
+  assert.ok(floodBrake);
+  assert.equal(floodBrake.blocked, 127);
+});
+
+test('a drain window is set as hours, and cleared with zero', async () => {
+  const on = await (await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ drainHours: 12 })
+  })).json();
+
+  assert.ok(on.drainUntil, 'a deadline was stored');
+  const hours = (new Date(on.drainUntil) - Date.now()) / 3600000;
+  assert.ok(hours > 11 && hours <= 12, `got ${hours}h`);
+
+  const off = await (await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ drainHours: 0 })
+  })).json();
+
+  assert.equal(off.drainUntil, '');
+});
+
+test('a drain window longer than three days is refused', async () => {
+  // A deadline that far out is a switch with extra steps.
+  const answer = await call('/api/settings/delivery', {
+    method: 'PUT', body: JSON.stringify({ drainHours: 240 })
+  });
+
+  assert.equal(answer.status, 400);
+});

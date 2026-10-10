@@ -355,7 +355,7 @@ export function createApi({ db, config, fetchImpl }) {
       ? { ...current, maxPerRun: override }
       : current;
 
-    const { ready, skipped, floodBrake } = buildEventOutbox({
+    const { ready, skipped, floodBrake, backlog } = buildEventOutbox({
       events, templates, recipients, messaging
     });
 
@@ -374,6 +374,10 @@ export function createApi({ db, config, fetchImpl }) {
       // Unsent events nothing will try again, because their attempts ran out
       // while the CRM was unreachable. Reported where the sender already
       // looks, since nowhere else would have shown them at all.
+      // Set while a backlog is draining: how much is going out now and how
+      // much waits for the next run. Absent on an ordinary run.
+      backlog: backlog ?? null,
+
       stuck: await db.exhaustedCount(),
 
       // Events the CRM refuses outright: this key's user may not see that
@@ -1621,6 +1625,10 @@ export function createApi({ db, config, fetchImpl }) {
       // needs, and lowering it is what a bulk edit needs.
       maxPerRun: effective.maxPerRun,
 
+      // While this is in the future the brake stands aside and the queue
+      // drains a runful at a time. Empty, or past, means it is back on.
+      drainUntil: stored.drainUntil || '',
+
       // Whether a message reaches its source at all — the plain-language
       // form of the same fact, because "redirectAllTo is set" is not how
       // anyone thinks about it.
@@ -1632,6 +1640,7 @@ export function createApi({ db, config, fetchImpl }) {
         redirectAllTo: 'redirectAllTo' in stored ? 'dashboard' : 'environment',
         copyTo: 'copyTo' in stored ? 'dashboard' : 'environment',
         maxPerRun: 'maxPerRun' in stored ? 'dashboard' : 'environment',
+        drainUntil: stored.drainUntil ? 'dashboard' : 'off',
         totalColumn: 'totalColumn' in stored ? 'dashboard' : 'environment',
         credentialExpiresAt: 'credentialExpiresAt' in stored ? 'dashboard' : 'unset'
       }
@@ -1695,6 +1704,22 @@ export function createApi({ db, config, fetchImpl }) {
       patch.maxPerRun = String(limit);
     }
 
+    // How long the brake stands aside, in hours from now. The caller names
+    // a duration rather than a timestamp because that is the decision being
+    // made — "clear this backlog today" — and a deadline computed here
+    // cannot be a date somebody mistyped into next year.
+    if ('drainHours' in body) {
+      const hours = Number(body.drainHours);
+
+      if (!Number.isFinite(hours) || hours < 0 || hours > 72) {
+        return { status: 400, body: { error:
+          'drainHours must be between 0 and 72. Zero puts the brake back.' } };
+      }
+
+      patch.drainUntil = hours > 0
+        ? new Date(Date.now() + hours * 3600 * 1000).toISOString() : '';
+    }
+
     for (const key of ['redirectAllTo', 'copyTo']) {
       if (patch[key] && !patch[key].includes('@')) {
         return { status: 400, body: { error: `${key} must be an email address.` } };
@@ -1704,7 +1729,7 @@ export function createApi({ db, config, fetchImpl }) {
     if (!Object.keys(patch).length) {
       return { status: 400, body: { error:
         'Nothing to change. Send live, redirectAllTo, copyTo, totalColumn, ' +
-      'credentialExpiresAt or maxPerRun.' } };
+      'credentialExpiresAt, maxPerRun or drainHours.' } };
     }
 
     await db.saveDeliverySettings(patch);
@@ -1717,6 +1742,7 @@ export function createApi({ db, config, fetchImpl }) {
       copyTo: effective.copyTo || '',
       totalColumn: effective.columns.total || '',
       maxPerRun: effective.maxPerRun,
+      drainUntil: effective.drainUntil || '',
       credentialDaysLeft: await credentialDaysLeft(),
       live: !effective.redirectAllTo
     };

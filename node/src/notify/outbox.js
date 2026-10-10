@@ -287,6 +287,27 @@ export function summarizeSkips(skipped) {
  * @param {object} input.messaging
  * @returns {{ready: Array<object>, skipped: Array<object>, floodBrake: ?object}}
  */
+/**
+ * Whether a backlog is being deliberately drained right now.
+ *
+ * The permission to bypass the flood brake expires on its own. That is the
+ * point of storing a deadline rather than a flag: a drain is a decision
+ * about one backlog, and a switch left on quietly removes the protection
+ * for every bulk edit that follows — which nobody would notice until the
+ * day it mattered.
+ *
+ * @param {object} messaging
+ * @returns {boolean}
+ */
+export function draining(messaging) {
+  const until = messaging?.drainUntil;
+  if (!until) return false;
+
+  const deadline = new Date(until).getTime();
+
+  return Number.isFinite(deadline) && deadline > Date.now();
+}
+
 export function buildEventOutbox({ events, templates, recipients, messaging }) {
   const ready = [];
   const skipped = [];
@@ -426,9 +447,30 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
     });
   }
 
-  // The flood brake. A bulk status edit in the CRM would otherwise fire one
-  // real message per lead, and none of them can be recalled.
   if (ready.length > messaging.maxPerRun) {
+    // A backlog somebody has already looked at and decided to clear. The
+    // brake's question — "does anyone know why there are suddenly this
+    // many?" — has an answer, so it steps aside and the queue drains a
+    // runful at a time instead of all at once or not at all.
+    //
+    // Deliberately drained in order, oldest first: a source waiting since
+    // Thursday hears before one whose lead moved an hour ago.
+    if (draining(messaging)) {
+      return {
+        ready: ready.slice(0, messaging.maxPerRun),
+        skipped,
+        floodBrake: null,
+        backlog: {
+          total: ready.length,
+          releasing: Math.min(ready.length, messaging.maxPerRun),
+          remaining: Math.max(0, ready.length - messaging.maxPerRun),
+          drainUntil: String(messaging.drainUntil)
+        }
+      };
+    }
+
+    // The flood brake. A bulk status edit in the CRM would otherwise fire one
+    // real message per lead, and none of them can be recalled.
     return {
       ready: [],
       skipped,
@@ -439,8 +481,8 @@ export function buildEventOutbox({ events, templates, recipients, messaging }) {
         message:
           `${ready.length} messages were queued in one run, above the limit ` +
           `of ${messaging.maxPerRun}. Nothing is being released. Review the ` +
-          'CRM for a bulk edit, then raise MAX_SENDS_PER_RUN for one run or ' +
-          'mark the events as notified to discard them.'
+          'CRM for a bulk edit, then either set a drain window to release ' +
+          'them a runful at a time, or mark them as notified to discard them.'
       }
     };
   }

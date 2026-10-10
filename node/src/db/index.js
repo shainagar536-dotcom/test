@@ -38,7 +38,12 @@ const DELIVERY_KEYS = new Set([
   // environment because the one moment it has to move is the moment a
   // legitimate backlog has built up — after an outage — and that is exactly
   // when nobody wants the answer to be "redeploy the service".
-  'maxPerRun'
+  'maxPerRun',
+
+  // Until when the flood brake stands aside for a backlog somebody has
+  // already decided to clear. A deadline rather than a switch, so the
+  // protection comes back on its own.
+  'drainUntil'
 ]);
 
 /** Where the CRM's own "retry later" deadline is kept. */
