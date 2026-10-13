@@ -1234,6 +1234,18 @@ export function createApi({ db, config, fetchImpl }) {
           scope: null,
           error: error.message,
           hint: error.hint || null,
+
+          // The cause, when the error is one we have already diagnosed.
+          // "invalid_client" here has meant the same thing every time: a new
+          // API key was created under this user, and Surense cancels the
+          // previous one when that happens. Naming it saves whoever reads
+          // this from diagnosing it a fourth time.
+          likelyCause: /invalid_client/.test(String(error.body ?? ''))
+            ? 'A newer API key was probably created under the same Surense ' +
+              'user, which cancels this one. Check API/Webhooks for a key ' +
+              'created after this service last worked.'
+            : null,
+
           status: error.status || null,
 
           // What the service said in its own words, and how long it asked to

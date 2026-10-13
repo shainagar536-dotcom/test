@@ -3250,3 +3250,58 @@ test('a drain window longer than three days is refused', async () => {
 
   assert.equal(answer.status, 400);
 });
+
+test('a cancelled key is reported with the cause, not just the error',
+  async () => {
+    // "invalid_client" has meant the same thing three times running: a newer
+    // API key was created under the same Surense user, which cancels this
+    // one. Whoever reads the alarm should not have to diagnose it a fourth
+    // time from scratch.
+    const dead = createApi({
+      db,
+      config: { ...config, surense: { ...config.surense, clientId: 'cid_dead' } },
+      fetchImpl: async () => new Response(
+        JSON.stringify({ error: 'invalid_client',
+          error_description: 'Client authentication failed.' }),
+        { status: 401 })
+    });
+
+    await new Promise(resolve => dead.listen(0, '127.0.0.1', resolve));
+
+    try {
+      const answer = await fetch(
+        `http://127.0.0.1:${dead.address().port}/api/crm?now=true`,
+        { method: 'POST', headers: { Authorization: 'Bearer test-token' } });
+
+      const { auth } = await answer.json();
+
+      assert.equal(auth.ok, false);
+      assert.match(auth.likelyCause, /newer API key/);
+      assert.match(auth.likelyCause, /cancels this one/);
+    } finally {
+      dead.close();
+    }
+  });
+
+test('an ordinary failure claims no cause it has not established', async () => {
+  const flaky = createApi({
+    db,
+    config,
+    fetchImpl: async () => new Response(
+      JSON.stringify({ error: 'server_error' }), { status: 503 })
+  });
+
+  await new Promise(resolve => flaky.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const answer = await fetch(
+      `http://127.0.0.1:${flaky.address().port}/api/crm?now=true`,
+      { method: 'POST', headers: { Authorization: 'Bearer test-token' } });
+
+    const { auth } = await answer.json();
+
+    assert.equal(auth.likelyCause, null);
+  } finally {
+    flaky.close();
+  }
+});
