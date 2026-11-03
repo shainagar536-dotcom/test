@@ -7,9 +7,27 @@
     Standalone: this talks to the Surense API directly and has nothing to do
     with the mirror service, its database or its code. Run it by hand.
 
+    Two ways to authenticate, because they are not equivalent:
+
+      -ClientId / -ClientSecret  the API key. Reads fine, but Surense
+                                 refuses ownerId with "not authorized to
+                                 perform this operation" — proven against
+                                 a lead that already had that very owner.
+
+      -BearerToken               a token copied from the browser, so the
+                                 call is made as the signed-in person. The
+                                 Surense screen sends the identical request
+                                 — PATCH /leads/{id} with {"ownerId": "..."}
+                                 — and gets 200, so this is the one that
+                                 works today.
+
+    A browser token expires after a while. If it lapses part way the script
+    stops and says so; take a fresh one and run it again — leads already
+    moved are skipped, so a second run picks up where the first stopped.
+
     Credentials are never stored here. Pass them as parameters, set
     SURENSE_CLIENT_ID / SURENSE_CLIENT_SECRET in the environment, or let the
-    script ask. They are the same pair the Render service uses.
+    script ask.
 
     THIS WRITES TO THE CRM — the only thing in this project that does. It is
     built so the change can be taken back:
@@ -29,6 +47,10 @@
 param(
     [string] $ClientId     = $env:SURENSE_CLIENT_ID,
     [string] $ClientSecret = $env:SURENSE_CLIENT_SECRET,
+
+    # A token copied from the browser's own request. Supply this and the
+    # client credentials are not used at all.
+    [string] $BearerToken  = '',
     [string] $TokenUrl     = 'https://api.surense.com/oauth/token',
     [string] $ApiBase      = 'https://api.surense.com/api/v1',
 
@@ -46,9 +68,12 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-if (-not $ClientId)     { $ClientId     = Read-Host 'Surense client id  (cid_...)' }
-if (-not $ClientSecret) { $ClientSecret = Read-Host 'Surense client secret (csk_...)' }
-if (-not $OwnerId)      { $OwnerId      = Read-Host 'Owner user id to set on every lead' }
+if (-not $BearerToken) {
+    if (-not $ClientId)     { $ClientId     = Read-Host 'Surense client id  (cid_...)' }
+    if (-not $ClientSecret) { $ClientSecret = Read-Host 'Surense client secret (csk_...)' }
+}
+
+if (-not $OwnerId) { $OwnerId = Read-Host 'Owner user id to set on every lead' }
 
 $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
 $backupCsv = Join-Path (Get-Location) "owners-backup-$stamp.csv"
@@ -115,28 +140,39 @@ function Set-Owner($leadId) {
 }
 
 # -------------------------------------------------------------------- auth
-Write-Host 'Authenticating...' -ForegroundColor Cyan
+if ($BearerToken) {
+    # Accept it with or without the word Bearer, since it is pasted by hand
+    # from a browser header where it appears both ways.
+    $token = $BearerToken -replace '^\s*Bearer\s+', ''
+    $script:headers = @{ Authorization = "Bearer $token" }
 
-$tokenResponse = Invoke-WebRequest -Uri $TokenUrl -Method Post -UseBasicParsing `
-    -ContentType 'application/x-www-form-urlencoded' `
-    -Body @{ grant_type = 'client_credentials'; client_id = $ClientId; client_secret = $ClientSecret }
-
-$token = (Read-Json $tokenResponse).access_token
-if (-not $token) { throw 'The token response carried no access_token.' }
-
-$script:headers = @{ Authorization = "Bearer $token" }
-
-$segment = $token.Split('.')[1].Replace('-', '+').Replace('_', '/')
-while ($segment.Length % 4) { $segment += '=' }
-$scopes = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($segment)) |
-             ConvertFrom-Json).scope) -split ' ')
-
-if ($scopes -notcontains 'leads:update') {
-    Write-Host 'STOP - leads:update is not on this key. Nothing can be written.' -ForegroundColor Red
-    return
+    Write-Host 'Using the browser token (acting as the signed-in user).' -ForegroundColor Cyan
 }
+else {
+    Write-Host 'Authenticating with the API key...' -ForegroundColor Cyan
 
-Write-Host '  ok, leads:update present.' -ForegroundColor Green
+    $tokenResponse = Invoke-WebRequest -Uri $TokenUrl -Method Post -UseBasicParsing `
+        -ContentType 'application/x-www-form-urlencoded' `
+        -Body @{ grant_type = 'client_credentials'; client_id = $ClientId; client_secret = $ClientSecret }
+
+    $token = (Read-Json $tokenResponse).access_token
+    if (-not $token) { throw 'The token response carried no access_token.' }
+
+    $script:headers = @{ Authorization = "Bearer $token" }
+
+    $segment = $token.Split('.')[1].Replace('-', '+').Replace('_', '/')
+    while ($segment.Length % 4) { $segment += '=' }
+    $scopes = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($segment)) |
+                 ConvertFrom-Json).scope) -split ' ')
+
+    if ($scopes -notcontains 'leads:update') {
+        Write-Host 'STOP - leads:update is not on this key. Nothing can be written.' -ForegroundColor Red
+        return
+    }
+
+    Write-Host '  ok, leads:update present.' -ForegroundColor Green
+    Write-Host '  note: the key is refused on ownerId. Use -BearerToken instead.' -ForegroundColor Yellow
+}
 
 # ------------------------------------------------------- confirm the owner
 try {
@@ -323,6 +359,16 @@ foreach ($lead in $rest) {
             Start-Sleep -Seconds 30
             try { Set-Owner $lead.id | Out-Null; $changed++ }
             catch { $failed++; $outcome = "failed $(Get-Status $_)" }
+        }
+        elseif ($code -eq 401) {
+            # The browser token has expired. Every remaining lead would fail
+            # the same way, so stop and say what to do rather than filling
+            # the log with nine hundred identical errors.
+            Write-Host ''
+            Write-Host '  the token expired. Stopping here.' -ForegroundColor Yellow
+            Write-Host '  Copy a fresh one from the browser and run again —'
+            Write-Host '  leads already moved are skipped, so it carries on.'
+            break
         }
         else {
             $failed++
