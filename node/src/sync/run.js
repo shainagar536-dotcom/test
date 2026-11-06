@@ -8,6 +8,7 @@ import { SurenseClient, toLabelledFields } from '../surense.js';
 import { planSync, readExisting, deriveColumns, headerFor } from '../mirror.js';
 import { optionsFromSchema } from '../sources.js';
 import { refreshSourceCatalog } from '../events/enrich.js';
+import { normalizeOwners } from './owner.js';
 
 /** Runs are serialised in-process; a second caller is told to wait. */
 let inFlight = null;
@@ -80,6 +81,13 @@ async function execute({ db, config, trigger, fetchImpl }) {
         db, client, path: config.sourceCatalogPath
       }).catch(error => ({ loaded: 0, written: 0, error: error.message }));
 
+      // Pointing every lead's owner at one user. Deliberately not fatal:
+      // this changes who a lead belongs to, not what the service knows, and
+      // a CRM that refuses it must not also stop the source catalog from
+      // refreshing. It reports the reason instead.
+      const owners = await normalizeOwners({ client, db, owner: config.owner })
+        .catch(error => ({ ran: false, reason: 'failed', error: error.message }));
+
       const summary = {
         ok: !catalog.error,
         trigger,
@@ -87,9 +95,11 @@ async function execute({ db, config, trigger, fetchImpl }) {
         stats: {},
         outcome: catalog.error
           ? `mirror off; the source catalog could not be read: ${catalog.error}`
-          : `mirror off; refreshed ${catalog.loaded} sources`,
+          : `mirror off; refreshed ${catalog.loaded} sources` +
+            (owners.changed ? `; moved ${owners.changed} leads to the configured owner` : ''),
         sourcesLoaded: catalog.loaded,
         sourcesWritten: catalog.written,
+        owners,
         error: catalog.error ?? null
       };
 
@@ -170,6 +180,10 @@ async function execute({ db, config, trigger, fetchImpl }) {
       columnNames: columns.slice(0, 12).map(column => column.label),
       rebaselined: Boolean(existing.relabelled),
       changesRecorded: changes.length,
+      // Same pass as on the mirror-off path, so turning MIRROR_LEADS on does
+      // not quietly stop the owners from being normalised.
+      owners: await normalizeOwners({ client, db, owner: config.owner })
+        .catch(error => ({ ran: false, reason: 'failed', error: error.message })),
       durationMs: Date.now() - startedAt.getTime(),
       ...stats
     };

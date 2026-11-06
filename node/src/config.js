@@ -180,6 +180,29 @@ export function loadConfig() {
       mirrorLeads: optional('MIRROR_LEADS', 'false') === 'true'
     },
 
+    // Pointing every lead's owner at one user.
+    //
+    // The only thing in this service that writes to the CRM, and it writes
+    // one field: ownerId. The assignee is never sent.
+    //
+    // Off unless OWNER_NORMALIZE_ID names a user, because a default that
+    // quietly rewrites the CRM is the wrong default. Needs the leads:owner
+    // scope on the API key, or every write is refused with a 400 that reads
+    // like a malformed request.
+    owner: {
+      targetId: optional('OWNER_NORMALIZE_ID', ''),
+
+      // Once a day. The pass reads every lead, which is the expensive part;
+      // the drift it corrects is a handful a day, so hourly would buy
+      // nothing and spend eighty requests an hour to find it.
+      everyHours: number('OWNER_NORMALIZE_EVERY_HOURS', 24),
+
+      // Refuse to rewrite more than this in one pass. A wrong id makes every
+      // lead look drifted, and this is what stops that from becoming four
+      // thousand writes before anyone looks.
+      maxPerRun: number('OWNER_NORMALIZE_MAX_PER_RUN', 300)
+    },
+
     // The catalog of referring sources: every source by id and name, in one
     // call. Confirmed against the live CRM — and the name arrives under
     // `title`, not `name`.

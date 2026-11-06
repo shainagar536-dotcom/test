@@ -596,6 +596,27 @@ export class SurenseClient {
   }
 
   /**
+   * Sets a lead's owner. The ONLY write this client makes.
+   *
+   * The body carries ownerId and nothing else, so the assignee — who
+   * actually handles the lead — is untouched.
+   *
+   * PATCH, not PUT: PUT answers 405 "Method 'PUT' is not supported" and POST
+   * answers "This endpoint is not part of the public API". Needs the
+   * leads:owner scope ("שינוי בעלים לידים"); without it Surense refuses with
+   * 400 and "not authorized to perform this operation", which reads like a
+   * malformed request rather than a missing permission.
+   *
+   * @param {string} leadId
+   * @param {string} ownerId
+   */
+  async setLeadOwner(leadId, ownerId) {
+    await this.resolveBase();
+
+    return this.request('PATCH', `/leads/${encodeURIComponent(leadId)}`, { ownerId });
+  }
+
+  /**
    * Every lead, following pagination to the end.
    *
    * Reports whether the read completed: a caller must never treat a truncated
