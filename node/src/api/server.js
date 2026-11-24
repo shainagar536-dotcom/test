@@ -338,7 +338,25 @@ export function createApi({ db, config, fetchImpl }) {
   // template and its recipient, with the message already rendered. The
   // scheduled sender calls this, sends what it gets, and reports back.
   route('GET', /^\/api\/outbox$/, async (_request, _params, url) => {
-    const events = await db.listStatusEvents({ pendingOnly: true, limit: 500 });
+    // Every pending event, not a recent slice of them.
+    //
+    // This used to read the newest 500. That works while the queue is short,
+    // and silently stops working once it is not: most of what sits here can
+    // never be sent — a status nobody wrote wording for, a source that is a
+    // marketing channel rather than a person — and those accumulate at the
+    // front of the queue and push the sendable ones out of view. By November
+    // twenty-four messages with a template, a source and a live address had
+    // fallen below the window, the oldest from early September. Nothing was
+    // blocked or stuck; nothing was looking at them.
+    //
+    // The cap stays, as a ceiling against a runaway queue rather than a
+    // window: it is an order of magnitude above anything seen, and the flood
+    // brake downstream is what guards against sending too much at once.
+    const events = await db.listStatusEvents({
+      pendingOnly: true,
+      limit: config.messaging.outboxScan,
+      sort: 'asc'          // oldest first: a lead that has waited longest goes first
+    });
 
     const templates = new Map((await db.listTemplates())
       .map(template => [normalizeText(template.status), template]));
