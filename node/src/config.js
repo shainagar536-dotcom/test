@@ -274,15 +274,6 @@ export function loadConfig() {
 
       // The flood brake. A bulk status edit in the CRM would otherwise fire
       // one real message per lead, and none of them can be recalled.
-      // How many pending events the outbox weighs on each run.
-      //
-      // A ceiling, not a window: it has to stay above the whole pending
-      // queue, or events fall out of sight without being blocked, stuck or
-      // reported anywhere. Most of the queue can never be sent and is
-      // skipped in memory, which is cheap; what is not cheap is a sendable
-      // message nobody ever looks at again.
-      outboxScan: number('OUTBOX_SCAN_LIMIT', 20000),
-
       maxPerRun: number('MAX_SENDS_PER_RUN', 25),
 
       // A copy of every message, to somebody who wants to see what went out.
